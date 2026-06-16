@@ -1,0 +1,46 @@
+# ── 后端（Python） ──
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/*.pyo
+backend/.env
+backend/*.db
+backend/*.sqlite3
+
+# ── 前端（Node / Vite） ──
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/*.tsbuildinfo
+
+# ── 日志 ──
+*.log
+!**/.gitkeep
+
+# ── 系统生成 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Claude ──
+.claude/
+
+# ── 项目临时文件 / 过程文档（视需要开启） ──
+# 如果下面两个 markdown 文件是过程讨论文档不需要入库，取消注释：
+# *.md
+# !README.md
+# !**/README.md
+
+# ── 操作系统缩略图缓存 ──
+ehthumbs.db
+*.lnk
