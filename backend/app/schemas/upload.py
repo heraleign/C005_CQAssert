@@ -7,12 +7,14 @@ class SyncToMidRequest(BaseModel):
     scope_type: str = "system"
     scope_ids: Optional[List[str]] = None
     overwrite_empty: bool = False
+    sync_type: str = "full"
 
 
 class AuditMidRequest(BaseModel):
     asset_type: str
     scope_type: str = "system"
     scope_ids: Optional[List[str]] = None
+    cascade: bool = False
 
 
 class MidModifyRequest(BaseModel):
@@ -26,6 +28,34 @@ class SyncToResultRequest(BaseModel):
     asset_type: str
     scope_type: str = "system"
     scope_ids: Optional[List[str]] = None
+
+
+class SyncToResultMidRequest(BaseModel):
+    asset_type: str
+    scope_type: str = "system"
+    scope_ids: Optional[List[str]] = None
+    bill_month: Optional[str] = None
+
+
+class ConfirmUploadRequest(BaseModel):
+    asset_type: str
+    scope_type: str = "system"
+    scope_ids: Optional[List[str]] = None
+    bill_month: Optional[str] = None
+
+
+class MarkExcludeRequest(BaseModel):
+    asset_type: str
+    asset_id: str
+    exclude_flag: bool = True
+    reason: str = ""
+
+
+class MergeRecordsRequest(BaseModel):
+    asset_type: str
+    source_ids: List[str]
+    target_id: str
+    bill_month: Optional[str] = None
 
 
 class UploadToGroupRequest(BaseModel):

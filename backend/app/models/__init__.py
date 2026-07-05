@@ -9,6 +9,11 @@ from app.models.upload_mid import (
     MidFieldModifyLog,
     UploadOperationLog,
     UploadResultTable,
+    UploadResultMid,
+    UploadGroupResult,
+    ExcludeMark,
+    MergeLog,
+    SyncDefaultValue,
     ClassifyMid,
     MetadataCompleteTask,
 )
@@ -56,6 +61,11 @@ __all__ = [
     "MidFieldModifyLog",
     "UploadOperationLog",
     "UploadResultTable",
+    "UploadResultMid",
+    "UploadGroupResult",
+    "ExcludeMark",
+    "MergeLog",
+    "SyncDefaultValue",
     "ClassifyMid",
     "MetadataCompleteTask",
 ]

@@ -8,6 +8,7 @@ import DatasetDetail from './pages/DatasetDetail'
 import CatalogTree from './pages/CatalogTree'
 import UploadGroup from './pages/UploadGroup'
 import ResourceUpload from './pages/ResourceUpload'
+import ResourceUploadV2 from './pages/ResourceUploadV2'
 import AuditRules from './pages/AuditRules'
 import AuditResults from './pages/AuditResults'
 import SystemMgmt from './pages/SystemMgmt'
@@ -15,6 +16,9 @@ import HandoverLog from './pages/HandoverLog'
 import MetaModelConfig from './pages/MetaModelConfig'
 import UploadModifyLog from './pages/UploadModifyLog'
 import UploadOperationLog from './pages/UploadOperationLog'
+import UploadResultView from './pages/UploadResultView'
+import ExcludeMarkView from './pages/ExcludeMarkView'
+import MergeLogView from './pages/MergeLogView'
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token'))
@@ -43,6 +47,7 @@ function App() {
         <Route path="catalog" element={<CatalogTree />} />
         <Route path="upload" element={<UploadGroup />} />
         <Route path="upload/resource" element={<ResourceUpload />} />
+        <Route path="upload/resource-v2" element={<ResourceUploadV2 />} />
         <Route path="audit/rules" element={<AuditRules />} />
         <Route path="audit/results" element={<AuditResults />} />
         <Route path="system" element={<SystemMgmt />} />
@@ -50,6 +55,9 @@ function App() {
         <Route path="meta-config" element={<MetaModelConfig />} />
         <Route path="upload/modify-log" element={<UploadModifyLog />} />
         <Route path="upload/upload-log" element={<UploadOperationLog />} />
+        <Route path="upload/result-view" element={<UploadResultView />} />
+        <Route path="upload/exclude-marks" element={<ExcludeMarkView />} />
+        <Route path="upload/merge-logs" element={<MergeLogView />} />
       </Route>
       <Route path="/login" element={<Navigate to="/" />} />
     </Routes>
