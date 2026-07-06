@@ -40,8 +40,9 @@ class SyncToResultMidRequest(BaseModel):
 class ConfirmUploadRequest(BaseModel):
     asset_type: str
     scope_type: str = "system"
-    scope_ids: Optional[List[str]] = None
+    scope_ids: Optional[List[Any]] = None
     bill_month: Optional[str] = None
+    cascade: bool = False
 
 
 class MarkExcludeRequest(BaseModel):
@@ -56,6 +57,11 @@ class MergeRecordsRequest(BaseModel):
     source_ids: List[str]
     target_id: str
     bill_month: Optional[str] = None
+
+
+class DeleteGroupResultRequest(BaseModel):
+    asset_type: str
+    biz_id: str
 
 
 class UploadToGroupRequest(BaseModel):

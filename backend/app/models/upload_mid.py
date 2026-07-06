@@ -296,6 +296,7 @@ class UploadGroupResult(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     asset_type = Column(String(50), comment="资产类型")
     group_unique_id = Column(String(255), nullable=False, comment="集团唯一标识")
+    bill_month = Column(String(10), comment="上传账期 YYYYMM")
     data_snapshot = Column(Text, comment="数据全量快照JSON")
     sync_time = Column(DateTime, comment="同步时间")
     oper_type = Column(String(10), comment="操作类型")

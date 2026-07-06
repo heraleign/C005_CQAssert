@@ -584,8 +584,10 @@ class UploadEngine:
 
         query = self.db.query(mid_model).filter(
             mid_model.audit_status == "pass",
-            mid_model.upload_flag == "1",
         )
+        # UploadMidField 没有 upload_flag 字段，需防错
+        if hasattr(mid_model, "upload_flag"):
+            query = query.filter(mid_model.upload_flag == "1")
         if scope_ids:
             query = query.filter(mid_model.local_biz_id.in_(scope_ids))
         records = query.all()
@@ -658,10 +660,14 @@ class UploadEngine:
         scope_type: str = "system",
         scope_ids: Optional[List[str]] = None,
         bill_month: Optional[str] = None,
+        cascade: bool = False,
     ) -> Dict[str, Any]:
-        """从中间结果表确认上传到集团结果表（全量无账期）"""
+        """从中间结果表确认上传到集团结果表（全量无账期）
+        cascade=True 时，上传系统级联上传其下所有库/表/字段
+        """
         bill_month = bill_month or self._calc_bill_month()
 
+        # 收集本级别的记录
         query = self.db.query(UploadResultMid).filter(
             UploadResultMid.asset_type == asset_type,
             UploadResultMid.bill_month == bill_month,
@@ -669,8 +675,42 @@ class UploadEngine:
             UploadResultMid.audit_status == "pass",
         )
         if scope_ids:
-            query = query.filter(UploadResultMid.mid_local_biz_id.in_(scope_ids))
-        records = query.all()
+            query = query.filter(UploadResultMid.id.in_(scope_ids))
+        records = list(query.all())
+
+        # 级联：如果上传系统，同时上传其下所有库/表/字段
+        if cascade and asset_type == "system":
+            # 获取所选系统的 local_biz_id
+            sys_local_ids = set()
+            for r in records:
+                sys_local_ids.add(r.mid_local_biz_id)
+            if not sys_local_ids and scope_ids:
+                sys_recs = self.db.query(UploadResultMid.mid_local_biz_id).filter(
+                    UploadResultMid.id.in_(scope_ids),
+                    UploadResultMid.asset_type == "system",
+                ).all()
+                sys_local_ids = {s[0] for s in sys_recs}
+
+            if sys_local_ids:
+                # 查库 → 表 → 字段 的 local_biz_id
+                db_recs = self.db.query(UploadMidDatabase.local_biz_id).filter(
+                    UploadMidDatabase.sys_local_biz_id.in_(sys_local_ids)).all()
+                db_ids = {d[0] for d in db_recs}
+                tbl_recs = self.db.query(UploadMidTable.local_biz_id).filter(
+                    UploadMidTable.db_local_biz_id.in_(db_ids)).all()
+                tbl_ids = {t[0] for t in tbl_recs}
+                fld_recs = self.db.query(UploadMidField.local_biz_id).filter(
+                    UploadMidField.tbl_local_biz_id.in_(tbl_ids)).all()
+                fld_ids = {f[0] for f in fld_recs}
+
+                all_child_ids = db_ids | tbl_ids | fld_ids
+                child_records = self.db.query(UploadResultMid).filter(
+                    UploadResultMid.bill_month == bill_month,
+                    UploadResultMid.result_status.in_(["pending", "audited"]),
+                    UploadResultMid.audit_status == "pass",
+                    UploadResultMid.mid_local_biz_id.in_(all_child_ids),
+                ).all()
+                records.extend(child_records)
 
         success = 0
         skipped = 0
@@ -691,10 +731,12 @@ class UploadEngine:
                 existing.sync_time = now
                 existing.oper_type = OPER_TYPE_MODIFY
                 existing.oper_time = now.strftime("%Y%m%d%H%M%S")
+                existing.bill_month = rec.bill_month
             else:
                 obj = UploadGroupResult(
-                    asset_type=asset_type,
+                    asset_type=rec.asset_type,
                     group_unique_id=rec.group_unique_id,
+                    bill_month=rec.bill_month,
                     data_snapshot=rec.data_snapshot,
                     sync_time=now,
                     oper_type=OPER_TYPE_NEW,
@@ -707,13 +749,106 @@ class UploadEngine:
             success += 1
 
         self.db.commit()
-        self._log_operation("CONFIRM_UPLOAD", asset_type, scope_type,
+        asset_desc = f"{asset_type}+下级" if cascade else asset_type
+        self._log_operation("CONFIRM_UPLOAD", asset_desc, scope_type,
                             scope_ids[0] if scope_ids else None, "SUCCESS",
                             f"上传{success}条到集团结果表，跳过{skipped}条")
 
         return {"successCount": success, "skippedCount": skipped, "billMonth": bill_month}
 
-    # ─── 8. 标记是否上传 ─────────────────────────
+    # ─── 8. 从集团结果表删除 ─────────────────────
+
+    def delete_from_group_result(
+        self,
+        asset_type: str,
+        biz_id: str,
+    ) -> Dict[str, Any]:
+        """删除集团结果表记录，回退中间结果表状态
+        asset_type: system 或 database
+        biz_id: 对应的 local_biz_id（从级联筛选获得），也支持传入 group_unique_id
+        """
+        # 如果传入的是 group_unique_id，先解析为 local_biz_id
+        resolved_biz_id = biz_id
+        if biz_id.startswith("JT-SYS-"):
+            # 查找对应系统的 local_biz_id
+            sys_rec = self.db.query(UploadMidSystem.local_biz_id).filter(
+                UploadMidSystem.group_unique_id == biz_id).first()
+            if sys_rec:
+                resolved_biz_id = sys_rec[0]
+                asset_type = "system"
+            else:
+                return {"deletedCount": 0, "updatedCount": 0, "reason": "未找到对应系统记录"}
+        elif biz_id.count("-") >= 2 and not biz_id.startswith("CQ-"):
+            # 可能是 database 的 group_unique_id
+            db_rec = self.db.query(UploadMidDatabase.local_biz_id).filter(
+                UploadMidDatabase.group_unique_id == biz_id).first()
+            if db_rec:
+                resolved_biz_id = db_rec[0]
+                asset_type = "database"
+
+        # 收集所有需要处理的 local_biz_id（级联下级）
+        all_ids = {resolved_biz_id}
+
+        if asset_type == "system":
+            dbs = self.db.query(UploadMidDatabase.local_biz_id).filter(
+                UploadMidDatabase.sys_local_biz_id == biz_id).all()
+            db_ids = {d[0] for d in dbs}
+            all_ids.update(db_ids)
+            for did in db_ids:
+                tbls = self.db.query(UploadMidTable.local_biz_id).filter(
+                    UploadMidTable.db_local_biz_id == did).all()
+                tbl_ids = {t[0] for t in tbls}
+                all_ids.update(tbl_ids)
+                for tid in tbl_ids:
+                    flds = self.db.query(UploadMidField.local_biz_id).filter(
+                        UploadMidField.tbl_local_biz_id == tid).all()
+                    all_ids.update({f[0] for f in flds})
+        elif asset_type == "database":
+            tbls = self.db.query(UploadMidTable.local_biz_id).filter(
+                UploadMidTable.db_local_biz_id == biz_id).all()
+            tbl_ids = {t[0] for t in tbls}
+            all_ids.update(tbl_ids)
+            for tid in tbl_ids:
+                flds = self.db.query(UploadMidField.local_biz_id).filter(
+                    UploadMidField.tbl_local_biz_id == tid).all()
+                all_ids.update({f[0] for f in flds})
+        else:
+            return {"deletedCount": 0, "updatedCount": 0, "reason": "不支持的资产类型，仅支持 system/database"}
+
+        # 从 mid 表找到对应的 group_unique_id
+        group_ids = set()
+        type_map = {
+            "system": UploadMidSystem,
+            "database": UploadMidDatabase,
+            "table": UploadMidTable,
+            "field": UploadMidField,
+        }
+        for at, mdl in type_map.items():
+            records = self.db.query(mdl.group_unique_id).filter(
+                mdl.local_biz_id.in_(all_ids)).all()
+            group_ids.update({r[0] for r in records if r[0]})
+
+        if not group_ids:
+            return {"deletedCount": 0, "updatedCount": 0, "reason": "未找到对应记录"}
+
+        # 删除 UploadGroupResult 记录
+        deleted = self.db.query(UploadGroupResult).filter(
+            UploadGroupResult.group_unique_id.in_(group_ids)).delete(synchronize_session=False)
+
+        # 更新 UploadResultMid 状态（已上传→未上传）
+        updated = self.db.query(UploadResultMid).filter(
+            UploadResultMid.group_unique_id.in_(group_ids),
+            UploadResultMid.result_status == "uploaded",
+        ).update({"result_status": "pending"}, synchronize_session=False)
+
+        self.db.commit()
+        self._log_operation("DELETE_FROM_GROUP", asset_type, "single", biz_id,
+                            "SUCCESS",
+                            f"删除{deleted}条集团结果表，回退{updated}条中间结果表状态")
+
+        return {"deletedCount": deleted, "updatedCount": updated}
+
+    # ─── 9. 标记是否上传 ─────────────────────────
 
     def mark_upload_flag(
         self,
@@ -972,10 +1107,12 @@ class UploadEngine:
         bill_month: Optional[str] = None,
         result_status: Optional[str] = None,
         group_unique_id: Optional[str] = None,
+        mid_local_biz_id: Optional[str] = None,
+        parent_local_biz_id: Optional[str] = None,
         page: int = 1,
         size: int = 10,
     ) -> Dict[str, Any]:
-        """查询中间结果表数据"""
+        """查询中间结果表数据（支持下钻过滤+级联精确过滤 - v2）"""
         query = self.db.query(UploadResultMid)
         if asset_type:
             query = query.filter(UploadResultMid.asset_type == asset_type)
@@ -985,6 +1122,18 @@ class UploadEngine:
             query = query.filter(UploadResultMid.result_status == result_status)
         if group_unique_id:
             query = query.filter(UploadResultMid.group_unique_id.like(f"%{group_unique_id}%"))
+        if mid_local_biz_id:
+            # 按 mid_local_biz_id 精确过滤（级联选择当前层级时使用）
+            import logging
+            logging.warning(f"MID_LOCAL_BIZ_ID FILTER: mid_local_biz_id={mid_local_biz_id}, asset_type={asset_type}")
+            query = query.filter(UploadResultMid.mid_local_biz_id == mid_local_biz_id)
+        if parent_local_biz_id and asset_type and not mid_local_biz_id:
+            # 下钻过滤：根据父级 ID 查找子级记录
+            child_ids = self._get_child_ids_for_result(asset_type, parent_local_biz_id)
+            if child_ids:
+                query = query.filter(UploadResultMid.mid_local_biz_id.in_(child_ids))
+            else:
+                query = query.filter(text("1=0"))
 
         total = query.count()
         items = query.order_by(UploadResultMid.sync_time.desc()).offset(
@@ -992,7 +1141,7 @@ class UploadEngine:
 
         rows = []
         for i in items:
-            rows.append({
+            row = {
                 "id": i.id,
                 "assetType": i.asset_type,
                 "midLocalBizId": i.mid_local_biz_id,
@@ -1004,23 +1153,96 @@ class UploadEngine:
                 "mergeFlag": i.merge_flag,
                 "syncTime": str(i.sync_time) if i.sync_time else None,
                 "uploadTime": str(i.upload_time) if i.upload_time else None,
-            })
+            }
+
+            # 从 data_snapshot 解析字段数据（包含所有 mid-table 字段）
+            try:
+                if i.data_snapshot:
+                    snap = json.loads(i.data_snapshot) if isinstance(i.data_snapshot, str) else i.data_snapshot
+                    for snap_key, snap_val in snap.items():
+                        if snap_key not in ("id", "local_biz_id", "mid_local_biz_id", "data_snapshot"):
+                            row[snap_key] = snap_val
+            except Exception:
+                pass
+
+            # 补充父级名称（使用正确的 data_snapshot key 名）
+            row["sysName"] = ""
+            row["dbName"] = ""
+            row["tableName"] = ""
+            if i.asset_type == "database":
+                sys_local_biz_id = row.get("sys_local_biz_id", "")
+                if sys_local_biz_id:
+                    p = self.db.query(UploadMidSystem.sys_name).filter(UploadMidSystem.local_biz_id == sys_local_biz_id).first()
+                    row["sysName"] = p[0] if p else ""
+            elif i.asset_type == "table":
+                db_local_biz_id = row.get("db_local_biz_id", "")
+                if db_local_biz_id:
+                    p = self.db.query(UploadMidDatabase.db_name, UploadMidDatabase.sys_local_biz_id).filter(
+                        UploadMidDatabase.local_biz_id == db_local_biz_id).first()
+                    if p:
+                        row["dbName"] = p[0] or ""
+                        sys_id = p[1] or ""
+                        if sys_id:
+                            sp = self.db.query(UploadMidSystem.sys_name).filter(
+                                UploadMidSystem.local_biz_id == sys_id).first()
+                            row["sysName"] = sp[0] if sp else ""
+            elif i.asset_type == "field":
+                tbl_local_biz_id = row.get("tbl_local_biz_id", "")
+                if tbl_local_biz_id:
+                    p = self.db.query(UploadMidTable.table_name, UploadMidTable.db_local_biz_id).filter(
+                        UploadMidTable.local_biz_id == tbl_local_biz_id).first()
+                    if p:
+                        row["tableName"] = p[0] or ""
+                        db_id = p[1] or ""
+                        if db_id:
+                            dp = self.db.query(UploadMidDatabase.db_name, UploadMidDatabase.sys_local_biz_id).filter(
+                                UploadMidDatabase.local_biz_id == db_id).first()
+                            if dp:
+                                row["dbName"] = dp[0] or ""
+                                sys_id = dp[1] or ""
+                                if sys_id:
+                                    sp = self.db.query(UploadMidSystem.sys_name).filter(
+                                        UploadMidSystem.local_biz_id == sys_id).first()
+                                    row["sysName"] = sp[0] if sp else ""
+
+            rows.append(row)
 
         return {"total": total, "list": rows, "page": page, "size": size}
+
+    def _get_child_ids_for_result(self, asset_type: str, parent_local_biz_id: str) -> List[str]:
+        """查找指定父级下所有子级的 local_biz_id（用于结果表下钻）"""
+        level_idx = ASSET_LEVELS.index(asset_type)
+        if level_idx <= 0:
+            return []
+
+        parent_level = ASSET_LEVELS[level_idx - 1]
+        fk = PARENT_FK_MAP.get(asset_type)
+        mid_model = MID_MODEL_MAP.get(asset_type)
+        if not fk or not mid_model:
+            return []
+
+        # 查找该父级下的子记录
+        children = self.db.query(mid_model.local_biz_id).filter(
+            getattr(mid_model, fk) == parent_local_biz_id
+        ).all()
+        return [c[0] for c in children]
 
     def query_group_result_list(
         self,
         asset_type: Optional[str] = None,
         group_unique_id: Optional[str] = None,
+        bill_month: Optional[str] = None,
         page: int = 1,
         size: int = 10,
     ) -> Dict[str, Any]:
-        """查询集团结果表数据（只读）"""
+        """查询集团结果表数据（只读，支持账期过滤）"""
         query = self.db.query(UploadGroupResult)
         if asset_type:
             query = query.filter(UploadGroupResult.asset_type == asset_type)
         if group_unique_id:
             query = query.filter(UploadGroupResult.group_unique_id.like(f"%{group_unique_id}%"))
+        if bill_month:
+            query = query.filter(UploadGroupResult.bill_month == bill_month)
 
         total = query.count()
         items = query.order_by(UploadGroupResult.sync_time.desc()).offset(
@@ -1028,14 +1250,66 @@ class UploadEngine:
 
         rows = []
         for i in items:
-            rows.append({
+            row = {
                 "id": i.id,
                 "assetType": i.asset_type,
                 "groupUniqueId": i.group_unique_id,
                 "syncTime": str(i.sync_time) if i.sync_time else None,
                 "operType": i.oper_type,
                 "operTime": i.oper_time,
-            })
+            }
+
+            # 从 data_snapshot 解析字段数据
+            try:
+                if i.data_snapshot:
+                    snap = json.loads(i.data_snapshot) if isinstance(i.data_snapshot, str) else i.data_snapshot
+                    for snap_key, snap_val in snap.items():
+                        if snap_key not in ("id", "local_biz_id", "mid_local_biz_id", "data_snapshot"):
+                            row[snap_key] = snap_val
+            except Exception:
+                pass
+
+            # 补充父级名称（使用正确的 data_snapshot key 名）
+            row["sysName"] = ""
+            row["dbName"] = ""
+            row["tableName"] = ""
+            if i.asset_type == "database":
+                sys_local_biz_id = row.get("sys_local_biz_id", "")
+                if sys_local_biz_id:
+                    p = self.db.query(UploadMidSystem.sys_name).filter(UploadMidSystem.local_biz_id == sys_local_biz_id).first()
+                    row["sysName"] = p[0] if p else ""
+            elif i.asset_type == "table":
+                db_local_biz_id = row.get("db_local_biz_id", "")
+                if db_local_biz_id:
+                    p = self.db.query(UploadMidDatabase.db_name, UploadMidDatabase.sys_local_biz_id).filter(
+                        UploadMidDatabase.local_biz_id == db_local_biz_id).first()
+                    if p:
+                        row["dbName"] = p[0] or ""
+                        sys_id = p[1] or ""
+                        if sys_id:
+                            sp = self.db.query(UploadMidSystem.sys_name).filter(
+                                UploadMidSystem.local_biz_id == sys_id).first()
+                            row["sysName"] = sp[0] if sp else ""
+            elif i.asset_type == "field":
+                tbl_local_biz_id = row.get("tbl_local_biz_id", "")
+                if tbl_local_biz_id:
+                    p = self.db.query(UploadMidTable.table_name, UploadMidTable.db_local_biz_id).filter(
+                        UploadMidTable.local_biz_id == tbl_local_biz_id).first()
+                    if p:
+                        row["tableName"] = p[0] or ""
+                        db_id = p[1] or ""
+                        if db_id:
+                            dp = self.db.query(UploadMidDatabase.db_name, UploadMidDatabase.sys_local_biz_id).filter(
+                                UploadMidDatabase.local_biz_id == db_id).first()
+                            if dp:
+                                row["dbName"] = dp[0] or ""
+                                sys_id = dp[1] or ""
+                                if sys_id:
+                                    sp = self.db.query(UploadMidSystem.sys_name).filter(
+                                        UploadMidSystem.local_biz_id == sys_id).first()
+                                    row["sysName"] = sp[0] if sp else ""
+
+            rows.append(row)
 
         return {"total": total, "list": rows, "page": page, "size": size}
 
@@ -1207,16 +1481,83 @@ class UploadEngine:
             # 再处理普通文本过滤
             for field, val in filters.items():
                 if val and hasattr(mid_model, field):
-                    query = query.filter(getattr(mid_model, field).like(f"%{val}%"))
+                    if field == "local_biz_id":
+                        query = query.filter(getattr(mid_model, field) == val)
+                    else:
+                        query = query.filter(getattr(mid_model, field).like(f"%{val}%"))
 
         total = query.count()
         items = query.offset((page - 1) * size).limit(size).all()
 
         result = []
+        # 缓存父级名称查询
+        sys_cache = {}  # local_biz_id → sys_name
+        db_cache = {}   # local_biz_id → db_name
+
         for item in items:
             d = {"localBizId": item.local_biz_id}
             for col in mid_model.__table__.columns:
                 d[col.name] = getattr(item, col.name)
+
+            # 为子级列表添加父级名称
+            if asset_type == "database":
+                sys_id = getattr(item, "sys_local_biz_id", None) or getattr(item, "sys_code", None) or ""
+                if sys_id:
+                    if sys_id not in sys_cache:
+                        parent = self.db.query(UploadMidSystem.sys_name).filter(
+                            UploadMidSystem.local_biz_id == sys_id
+                        ).first()
+                        sys_cache[sys_id] = parent[0] if parent else ""
+                    d["sysName"] = sys_cache[sys_id]
+            elif asset_type == "table":
+                db_id = getattr(item, "db_local_biz_id", None) or ""
+                if db_id:
+                    if db_id not in db_cache:
+                        parent = self.db.query(UploadMidDatabase.db_name, UploadMidDatabase.sys_local_biz_id).filter(
+                            UploadMidDatabase.local_biz_id == db_id
+                        ).first()
+                        if parent:
+                            db_cache[db_id] = {"dbName": parent[0] or "", "sysLocalBizId": parent[1] or ""}
+                            sys_id = parent[1] or ""
+                            if sys_id and sys_id not in sys_cache:
+                                sp = self.db.query(UploadMidSystem.sys_name).filter(
+                                    UploadMidSystem.local_biz_id == sys_id
+                                ).first()
+                                sys_cache[sys_id] = sp[0] if sp else ""
+                        else:
+                            db_cache[db_id] = {"dbName": "", "sysLocalBizId": ""}
+                    d["dbName"] = db_cache[db_id]["dbName"]
+                    d["sysName"] = sys_cache.get(db_cache[db_id]["sysLocalBizId"], "")
+            elif asset_type == "field":
+                tbl_id = getattr(item, "tbl_local_biz_id", None) or ""
+                if tbl_id:
+                    tbl = self.db.query(UploadMidTable.table_name, UploadMidTable.db_local_biz_id).filter(
+                        UploadMidTable.local_biz_id == tbl_id
+                    ).first()
+                    if tbl:
+                        d["tableName"] = tbl[0] or ""
+                        db_id = tbl[1] or ""
+                        if db_id not in db_cache:
+                            parent = self.db.query(UploadMidDatabase.db_name, UploadMidDatabase.sys_local_biz_id).filter(
+                                UploadMidDatabase.local_biz_id == db_id
+                            ).first()
+                            if parent:
+                                db_cache[db_id] = {"dbName": parent[0] or "", "sysLocalBizId": parent[1] or ""}
+                                sys_id = parent[1] or ""
+                                if sys_id and sys_id not in sys_cache:
+                                    sp = self.db.query(UploadMidSystem.sys_name).filter(
+                                        UploadMidSystem.local_biz_id == sys_id
+                                    ).first()
+                                    sys_cache[sys_id] = sp[0] if sp else ""
+                            else:
+                                db_cache[db_id] = {"dbName": "", "sysLocalBizId": ""}
+                        d["dbName"] = db_cache[db_id]["dbName"]
+                        d["sysName"] = sys_cache.get(db_cache[db_id]["sysLocalBizId"], "")
+                    else:
+                        d["tableName"] = ""
+                        d["dbName"] = ""
+                        d["sysName"] = ""
+
             result.append(d)
 
         return {"total": total, "list": result, "page": page, "size": size}

@@ -9,6 +9,7 @@ from app.schemas.upload import (
     SyncToResultRequest, UploadToGroupRequest, MidListQuery,
     SyncToResultMidRequest, ConfirmUploadRequest,
     MarkExcludeRequest, MergeRecordsRequest,
+    DeleteGroupResultRequest,
 )
 from app.upload_engine import UploadEngine
 
@@ -61,6 +62,7 @@ def mid_list(
     asset_type: str = Query(),
     parent_local_biz_id: Optional[str] = None,
     parent_level: Optional[str] = None,
+    local_biz_id: Optional[str] = None,
     sys_code: Optional[str] = None,
     sys_name: Optional[str] = None,
     record_name: Optional[str] = None,
@@ -81,6 +83,8 @@ def mid_list(
         filters["parent_local_biz_id"] = parent_local_biz_id
     if parent_level:
         filters["parent_level"] = parent_level
+    if local_biz_id:
+        filters["local_biz_id"] = local_biz_id
     for k, v in [("sys_code", sys_code), ("sys_name", sys_name),
                  ("record_name", record_name), ("audit_status", audit_status),
                  ("upload_status", upload_status), ("status", sys_status),
@@ -144,12 +148,13 @@ def sync_to_result_mid(req: SyncToResultMidRequest, engine: UploadEngine = Depen
 
 @router.post("/confirm-upload")
 def confirm_upload(req: ConfirmUploadRequest, engine: UploadEngine = Depends(get_engine)):
-    """确认上传到集团结果表"""
+    """确认上传到集团结果表（支持级联上传下级）"""
     data = engine.confirm_upload(
         asset_type=req.asset_type,
         scope_type=req.scope_type,
         scope_ids=req.scope_ids,
         bill_month=req.bill_month,
+        cascade=req.cascade,
     )
     return CommonResponse(data=data)
 
@@ -186,15 +191,19 @@ def result_mid_list(
     bill_month: Optional[str] = None,
     result_status: Optional[str] = None,
     group_unique_id: Optional[str] = None,
+    mid_local_biz_id: Optional[str] = None,
+    parent_local_biz_id: Optional[str] = None,
     page: int = Query(1),
     size: int = Query(10),
     db: Session = Depends(get_db),
 ):
-    """查询中间结果表（带账期）"""
+    """查询中间结果表（带账期，支持下钻+级联过滤）"""
     engine = UploadEngine(db)
     data = engine.query_result_mid_list(
         asset_type=asset_type, bill_month=bill_month,
         result_status=result_status, group_unique_id=group_unique_id,
+        mid_local_biz_id=mid_local_biz_id,
+        parent_local_biz_id=parent_local_biz_id,
         page=page, size=size,
     )
     return CommonResponse(data=data)
@@ -204,15 +213,16 @@ def result_mid_list(
 def group_result_list(
     asset_type: Optional[str] = None,
     group_unique_id: Optional[str] = None,
+    bill_month: Optional[str] = None,
     page: int = Query(1),
     size: int = Query(10),
     db: Session = Depends(get_db),
 ):
-    """查询集团结果表（全量只读）"""
+    """查询集团结果表（全量只读，支持账期过滤）"""
     engine = UploadEngine(db)
     data = engine.query_group_result_list(
         asset_type=asset_type, group_unique_id=group_unique_id,
-        page=page, size=size,
+        bill_month=bill_month, page=page, size=size,
     )
     return CommonResponse(data=data)
 
@@ -262,6 +272,36 @@ def bill_months():
     """获取当前账期"""
     current = UploadEngine._calc_bill_month()
     return CommonResponse(data={"current": current})
+
+
+# ─── 新增：集团结果表操作 endpoints ─────────────
+
+@router.post("/group-result/delete")
+def delete_group_result(
+    req: DeleteGroupResultRequest,
+    engine: UploadEngine = Depends(get_engine),
+):
+    """删除集团结果表记录，回退中间结果表状态"""
+    data = engine.delete_from_group_result(
+        asset_type=req.asset_type,
+        biz_id=req.biz_id,
+    )
+    return CommonResponse(data=data)
+
+
+@router.post("/audit-by-scope")
+def audit_by_scope(
+    req: AuditMidRequest,
+    engine: UploadEngine = Depends(get_engine),
+):
+    """按选择范围触发稽核（用于集团结果表页面的全量稽核）"""
+    data = engine.audit_mid(
+        asset_type=req.asset_type,
+        scope_type=req.scope_type,
+        scope_ids=req.scope_ids,
+        cascade=req.cascade,
+    )
+    return CommonResponse(data=data)
 
 
 # ─── 原有 endpoints ────────────────────────────

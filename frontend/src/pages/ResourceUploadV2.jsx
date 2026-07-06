@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react"
-import { Table, Tabs, Select, Input, Button, Tag, Space, Modal, Form, message, Alert, Descriptions, Breadcrumb } from "antd"
-import { SyncOutlined, SafetyCertificateOutlined, SendOutlined, CloudUploadOutlined, HistoryOutlined, EditOutlined, SearchOutlined, WarningOutlined, StopOutlined, MergeCellsOutlined, TableOutlined, FileTextOutlined } from "@ant-design/icons"
+import { Table, Tabs, Select, Input, Button, Tag, Space, Modal, Form, message, Alert, Descriptions, Breadcrumb, Switch } from "antd"
+import { SyncOutlined, SafetyCertificateOutlined, SendOutlined, CloudUploadOutlined, HistoryOutlined, EditOutlined, SearchOutlined, WarningOutlined, StopOutlined, MergeCellsOutlined, TableOutlined, FileTextOutlined, DatabaseOutlined, AuditOutlined, DeleteOutlined } from "@ant-design/icons"
 import dayjs from "dayjs"
 import { useNavigate } from "react-router-dom"
 import api from "../services/api"
@@ -67,6 +67,7 @@ const TYPE_COLUMNS = {
       render: (v) => v === "1" ? <Tag color="blue">是</Tag> : <Tag>否</Tag> },
   ],
   database: [
+    { title: "所属系统", dataIndex: "sysName", width: 160, render: (v) => v || "-" },
     { title: "数据库名", dataIndex: "db_name", width: 160 },
     { title: "数据库类型", dataIndex: "db_type", width: 120 },
     { title: "IP", dataIndex: "db_ip", width: 120 },
@@ -75,6 +76,8 @@ const TYPE_COLUMNS = {
       render: (v, r) => <Switch checked={v !== "0"} checkedChildren="上传" unCheckedChildren="不上传" size="small" /> },
   ],
   table: [
+    { title: "所属系统", dataIndex: "sysName", width: 120, render: (v) => v || "-" },
+    { title: "所属数据库", dataIndex: "dbName", width: 120, render: (v) => v || "-" },
     { title: "表英文名", dataIndex: "table_name_en", width: 140 },
     { title: "表中文名", dataIndex: "table_name", width: 140 },
     { title: "主题域", dataIndex: "table_domain", width: 100 },
@@ -82,6 +85,9 @@ const TYPE_COLUMNS = {
       render: (v, r) => <Switch checked={v !== "0"} checkedChildren="上传" unCheckedChildren="不上传" size="small" /> },
   ],
   field: [
+    { title: "所属系统", dataIndex: "sysName", width: 120, render: (v) => v || "-" },
+    { title: "所属数据库", dataIndex: "dbName", width: 120, render: (v) => v || "-" },
+    { title: "所属表", dataIndex: "tableName", width: 140, render: (v) => v || "-" },
     { title: "字段英文名", dataIndex: "field_name_en", width: 140 },
     { title: "字段中文名", dataIndex: "field_name_cn", width: 140 },
     { title: "字段类型", dataIndex: "field_type", width: 100 },
@@ -109,6 +115,7 @@ export default function ResourceUploadV2() {
   const [loading, setLoading] = useState(false)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 10, total: 0 })
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
+  const [selectedResultKeys, setSelectedResultKeys] = useState([])
   // Filters
   const [filters, setFilters] = useState({
     sysCode: "", sysName: "", recordName: "", sysStatus: "",
@@ -127,6 +134,7 @@ export default function ResourceUploadV2() {
   const [deadlineDays, setDeadlineDays] = useState(0)
   // Bill month
   const [billMonth, setBillMonth] = useState("")
+  const [availableBillMonths, setAvailableBillMonths] = useState([])
   // View mode: mid / result-mid / group-result
   const [viewMode, setViewMode] = useState("mid")
   // Merge suggestions
@@ -150,6 +158,16 @@ export default function ResourceUploadV2() {
       bm = today.format("YYYYMM")
     }
     setBillMonth(bm)
+    // 获取可用账期
+    api.get("/upload/bill-months").then(res => {
+      if (res.code === "000000" && res.data?.current) {
+        const months = [res.data.current]
+        // 同时添加上个月作为选项
+        const prev = dayjs(res.data.current + "01").subtract(1, "month").format("YYYYMM")
+        months.unshift(prev)
+        setAvailableBillMonths(months)
+      }
+    }).catch(() => {})
   }, [])
 
   // Walk up cascade to find nearest ancestor filter for current tab
@@ -198,28 +216,109 @@ export default function ResourceUploadV2() {
     setCascadeOpts((prev) => ({ ...prev, [level]: opts }))
   }, [selectedPath])
 
+  // Enrich mid-list data with parent display names
+  const enrichData = useCallback((list, assetType) => {
+    if (!list || list.length === 0) return list
+    try {
+      // 如果后端已补充父级名称，直接返回
+      const firstItem = list[0]
+      if (firstItem.sysName !== undefined || firstItem.sysName !== null) {
+        // 可能已有部分数据，直接返回
+        return list
+      }
+      // 从 cascadeOpts 和 selectedPath 构建名称映射
+      const nameMaps = { system: {}, database: {}, table: {} }
+      Object.entries(cascadeOpts).forEach(([level, items]) => {
+        (items || []).forEach(i => {
+          if (level === "system") nameMaps.system[i.localBizId] = i.sysName || i.sysCode || i.localBizId
+          else if (level === "database") nameMaps.database[i.localBizId] = i.dbName || i.localBizId
+          else if (level === "table") nameMaps.table[i.localBizId] = i.tableName || i.tableNameEn || i.localBizId
+        })
+      })
+      return list.map(item => {
+        const enriched = { ...item }
+        if (assetType === "database") {
+          const sysId = item.sys_local_biz_id || item.sys_code || ""
+          enriched.sysName = nameMaps.system[sysId] || sysId || ""
+        } else if (assetType === "table") {
+          const dbId = item.db_local_biz_id || ""
+          enriched.dbName = nameMaps.database[dbId] || dbId || ""
+          enriched.sysName = ""
+        } else if (assetType === "field") {
+          const tblId = item.tbl_local_biz_id || ""
+          enriched.tableName = nameMaps.table[tblId] || tblId || ""
+          enriched.dbName = ""
+          enriched.sysName = ""
+        }
+        return enriched
+      })
+    } catch (e) {
+      console.warn("enrichData error:", e)
+      return list  // 出错时返回原始数据
+    }
+  }, [cascadeOpts])
+
   // Fetch table data for current level with parent filter
   const fetchData = useCallback(async (page, size) => {
     const p = page || pagination.current
     const s = size || pagination.pageSize
     setLoading(true)
     try {
-      const parentFilter = getParentFilter()
-      const parentId = parentFilter?.localBizId || null
-      const extra = {}
-      if (parentFilter && parentFilter.level !== LEVELS[LEVELS.indexOf(currentLevel) - 1]) {
-        // Indirect parent — pass parent_level hint for backend cascade filtering
-        extra.parent_level = parentFilter.level
+      if (viewMode === "mid") {
+        // 中间表视图（支持下钻+级联过滤）
+        const parentFilter = getParentFilter()
+        const parentId = parentFilter?.localBizId || null
+        const extra = {}
+        if (parentFilter && parentFilter.level !== LEVELS[LEVELS.indexOf(currentLevel) - 1]) {
+          extra.parent_level = parentFilter.level
+        }
+        // 如果级联选择了当前层级的项目，按 local_biz_id 精确过滤（只显示该条记录）
+        const currentSelected = selectedPath[currentLevel]
+        if (currentSelected?.localBizId) {
+          extra.local_biz_id = currentSelected.localBizId
+        }
+        if (filters.auditStatus) extra.audit_status = filters.auditStatus
+        if (filters.uploadStatus) extra.upload_status = filters.uploadStatus
+        const result = await fetchMidList(currentLevel, parentId, extra, p, s)
+        // 补充父级名称信息
+        const enriched = enrichData(result.list || [], currentLevel)
+        setData(enriched)
+        setPagination({ current: result.page, pageSize: result.size, total: result.total })
+      } else if (viewMode === "result-mid") {
+        // 中间结果表视图（支持下钻+级联过滤）
+        const params = { page: p, size: s, asset_type: currentLevel }
+        if (billMonth) params.bill_month = billMonth
+        // 如果级联选择了当前层级的项目，按 mid_local_biz_id 精确过滤
+        const currentSelected = selectedPath[currentLevel]
+        if (currentSelected?.localBizId) {
+          params.mid_local_biz_id = currentSelected.localBizId
+        }
+        // 查找父级过滤（只在下级页签时生效）
+        if (currentLevel !== "system" && !currentSelected?.localBizId) {
+          const parentFilter = getParentFilter()
+          if (parentFilter?.localBizId) {
+            params.parent_local_biz_id = parentFilter.localBizId
+          }
+        }
+        const res = await api.get("/upload/result-mid-list", { params })
+        if (res.code === "000000") {
+          setData(res.data.list || [])
+          setPagination({ current: res.data.page, pageSize: res.data.size, total: res.data.total })
+        }
+      } else if (viewMode === "group-result") {
+        // 集团结果表视图（支持下钻+账期过滤）
+        const params = { page: p, size: s, asset_type: currentLevel }
+        if (billMonth) params.bill_month = billMonth
+        const res = await api.get("/upload/group-result-list", { params })
+        if (res.code === "000000") {
+          setData(res.data.list || [])
+          setPagination({ current: res.data.page, pageSize: res.data.size, total: res.data.total })
+        }
       }
-      if (filters.auditStatus) extra.audit_status = filters.auditStatus
-      if (filters.uploadStatus) extra.upload_status = filters.uploadStatus
-      const result = await fetchMidList(currentLevel, parentId, extra, p, s)
-      setData(result.list || [])
-      setPagination({ current: result.page, pageSize: result.size, total: result.total })
     } finally {
       setLoading(false)
     }
-  }, [currentLevel, getParentFilter, filters, pagination.current, pagination.pageSize])
+  }, [currentLevel, viewMode, getParentFilter, filters, pagination.current, pagination.pageSize, billMonth])
 
   // Load options for current level and its next level
   useEffect(() => {
@@ -233,14 +332,14 @@ export default function ResourceUploadV2() {
     }
   }, [currentLevel, loadOptions])
 
-  // Fetch table data when level or parent changes
+  // Fetch table data when level, parent, view mode, or bill month changes
   useEffect(() => {
     fetchData(1)
-  }, [currentLevel, selectedPath.system, selectedPath.database, selectedPath.table])
+  }, [currentLevel, selectedPath.system, selectedPath.database, selectedPath.table, viewMode, billMonth])
 
-  // Handle cascade select change — only updates filter selections, does NOT switch tab
-  const handleCascadeChange = (level, value) => {
-    if (!value) {
+  // Handle cascade select change
+  const handleCascadeChange = (level, selectedValue, option) => {
+    if (!selectedValue) {
       const cleared = {}
       const idx = LEVELS.indexOf(level)
       for (let i = idx; i < LEVELS.length; i++) {
@@ -249,13 +348,32 @@ export default function ResourceUploadV2() {
       setSelectedPath((prev) => ({ ...prev, ...cleared }))
       return
     }
+    // 从 option 或 value 中提取显示名
+    const opt = option || {}
+    const levelInfo = { localBizId: selectedValue }
+    if (level === "system") {
+      levelInfo.sysName = opt.sysName || opt.children || selectedValue
+      levelInfo.sysCode = opt.sysCode || selectedValue
+    } else if (level === "database") {
+      levelInfo.dbName = opt.dbName || opt.children || selectedValue
+    } else if (level === "table") {
+      levelInfo.tableName = opt.tableName || opt.tableNameEn || opt.children || selectedValue
+    } else if (level === "field") {
+      levelInfo.fieldNameCn = opt.fieldNameCn || opt.fieldNameEn || opt.children || selectedValue
+    }
     const newSelected = { ...selectedPath }
-    newSelected[level] = value
+    newSelected[level] = levelInfo
     const idx = LEVELS.indexOf(level)
     for (let i = idx + 1; i < LEVELS.length; i++) {
       newSelected[LEVELS[i]] = null
     }
     setSelectedPath(newSelected)
+
+    // 选中后立即加载下一级的选项
+    if (idx < LEVELS.length - 1) {
+      const nextLevel = LEVELS[idx + 1]
+      loadOptions(nextLevel)
+    }
   }
 
   // Breadcrumb navigation — clicking resets cascade to that level
@@ -340,13 +458,18 @@ export default function ResourceUploadV2() {
     const idx = LEVELS.indexOf(currentLevel)
     if (idx >= LEVELS.length - 1) return
     const nextLevel = LEVELS[idx + 1]
-    const value = { localBizId: record.local_biz_id }
+
+    // 获取当前记录的标识 local_biz_id
+    let bizId = record.local_biz_id || record.midLocalBizId || ""
+    if (!bizId) return
+
+    const value = { localBizId: bizId }
     // Populate display name for the cascade
     const nameMap = {
-      system: { key: "sysName", val: record.sys_name },
-      database: { key: "dbName", val: record.db_name },
-      table: { key: "tableName", val: record.table_name || record.table_name_en },
-      field: { key: "fieldNameCn", val: record.field_name_cn || record.field_name_en },
+      system: { key: "sysName", val: record.sys_name || record.sysName || "" },
+      database: { key: "dbName", val: record.db_name || record.dbName || "" },
+      table: { key: "tableName", val: record.table_name || record.tableName || record.table_name_en || "" },
+      field: { key: "fieldNameCn", val: record.field_name_cn || record.fieldNameCn || record.field_name_en || "" },
     }
     const m = nameMap[currentLevel]
     if (m) value[m.key] = m.val
@@ -454,6 +577,126 @@ export default function ResourceUploadV2() {
     } catch { message.error("上传失败") }
   }
 
+  // ─── 中间结果表稽核 ─────────────────────────
+
+  const handleResultAudit = async (record) => {
+    try {
+      const res = await api.post("/upload/audit", {
+        asset_type: record.assetType,
+        scope_ids: [record.midLocalBizId],
+      })
+      if (res.code === "000000") {
+        message.success(`稽核完成: 通过${res.data.passCount}条`)
+        fetchData()
+      }
+    } catch { message.error("稽核失败") }
+  }
+
+  // 中间结果表 - 批量稽核（全部/选中+子级）
+  const handleResultMidAudit = async () => {
+    const hasSelection = selectedResultKeys.length > 0
+    const payload = {
+      asset_type: currentLevel,
+      cascade: currentLevel === "system",
+    }
+    if (hasSelection) {
+      payload.scope_ids = selectedResultKeys
+    }
+    try {
+      const res = await api.post("/upload/audit", payload)
+      if (res.code === "000000") {
+        message.success(`稽核完成: 通过${res.data.passCount}条, 不通过${res.data.failCount}条`)
+        setSelectedResultKeys([])
+        fetchData()
+      }
+    } catch { message.error("稽核失败") }
+  }
+
+  const handleResultModify = (record) => {
+    // 弹出修改弹窗，数据从 record 中提取
+    setModifyRecord({
+      local_biz_id: record.midLocalBizId,
+      group_unique_id: record.groupUniqueId,
+      ...record
+    })
+    const fields = {}
+    // 根据资产类型提取可编辑字段
+    const editFields = EDITABLE_FIELDS[currentLevel] || []
+    editFields.forEach(f => { fields[f] = record[f] || "" })
+    setModifyFields(fields)
+    setModifyReason("")
+    setModifyVisible(true)
+  }
+
+  const handleResultUploadSelected = async (cascaded = false) => {
+    if (!selectedResultKeys.length) {
+      message.warning("请先勾选要上传的记录")
+      return
+    }
+    try {
+      const res = await api.post("/upload/confirm-upload", {
+        asset_type: currentLevel,
+        scope_ids: selectedResultKeys,
+        bill_month: billMonth,
+        cascade: cascaded,
+      })
+      if (res.code === "000000") {
+        message.success(`上传成功: ${res.data.successCount}条`)
+        setSelectedResultKeys([])
+        fetchData()
+      }
+    } catch { message.error("上传失败") }
+  }
+
+  // ─── 集团结果表操作 ───────────────────────────
+
+  const handleGroupAudit = async () => {
+    // 获取级联选择的 scope（优先从 selectedPath 取）
+    const currentSelected = selectedPath[currentLevel]
+    const scopeIds = currentSelected?.localBizId ? [currentSelected.localBizId] : null
+    try {
+      const payload = {
+        asset_type: currentLevel === "database" ? "database" : "system",
+        cascade: currentLevel === "system",
+      }
+      if (scopeIds) payload.scope_ids = scopeIds
+      const res = await api.post("/upload/audit-by-scope", payload)
+      if (res.code === "000000") {
+        message.success(`稽核完成: 通过${res.data.passCount}条, 不通过${res.data.failCount}条`)
+        fetchData()
+      }
+    } catch { message.error("稽核失败") }
+  }
+
+  const handleDeleteFromGroup = async (record) => {
+    // 获取删除实体的标识（集团结果表记录只含 groupUniqueId）
+    const groupId = record.groupUniqueId || ""
+    if (!groupId) {
+      message.error("无法获取记录标识")
+      return
+    }
+    const label = currentLevel === "system" ? "系统及其所有下级" : "数据库及其所有下级"
+    Modal.confirm({
+      title: `确认删除此${currentLevel === "system" ? "系统" : "数据库"}？`,
+      content: `将删除该${label}的集团结果表数据，并将中间结果表状态回退为「未上传」。此操作不可撤销。`,
+      okText: "确认删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          const res = await api.post("/upload/group-result/delete", {
+            asset_type: currentLevel,
+            biz_id: groupId,
+          })
+          if (res.code === "000000") {
+            message.success(`删除完成: 集团结果表${res.data.deletedCount}条, 回退中间结果表${res.data.updatedCount}条`)
+            fetchData()
+          }
+        } catch { message.error("删除失败") }
+      },
+    })
+  }
+
   // ─── Modify Modal ─────────────────────────────
 
   const openModify = (record) => {
@@ -554,15 +797,263 @@ export default function ResourceUploadV2() {
     )
   }
 
-  // Compute columns for current level
-  const columns = [
-    ...(TYPE_COLUMNS[currentLevel] || []),
-    { title: "稽核状态", dataIndex: "audit_status", width: 90, render: renderAuditStatus },
-    { title: "不合规原因", dataIndex: "non_compliant_reason", width: 200, ellipsis: true,
-      render: (v) => v ? <span title={v}>{v.length > 20 ? v.slice(0, 20) + "..." : v}</span> : "-" },
-    { title: "上传状态", dataIndex: "upload_status", width: 90, render: renderUploadStatus },
-    { title: "操作", key: "action", width: 260, fixed: "right", render: (_, r) => actionButtons(r) },
+  // 各资产类型在结果表中的完整字段列定义
+  // ─── 各资产类型结果表的完整列定义 ──────────────
+  // 全部字段与 dx_assets_*_cq 表列名一致，只显示有数据的字段
+  const RESULT_MID_SYSTEM_COLS = [
+    { title: "系统编码", dataIndex: "sys_code", width: 150, render: (v) => v || "-" },
+    { title: "系统名称", dataIndex: "sys_name", width: 180, render: (v) => v || "-" },
+    { title: "子系统名称", dataIndex: "sub_sys_name", width: 150, render: (v) => v || "-" },
+    { title: "系统简介", dataIndex: "sys_introduct", width: 200, ellipsis: true, render: (v) => v || "-" },
+    { title: "系统分类", dataIndex: "sys_classify", width: 100, render: (v) => v || "-" },
+    { title: "定级备案名称", dataIndex: "record_name", width: 150, render: (v) => v || "-" },
+    { title: "所属单位", dataIndex: "org_unit", width: 130, render: (v) => v || "-" },
+    { title: "归属部门", dataIndex: "org_dept", width: 130, render: (v) => v || "-" },
+    { title: "系统状态", dataIndex: "status", width: 80, render: (v) => <Tag>{v === "1" ? "在线" : v === "0" ? "下线" : v || "-"}</Tag> },
+    { title: "功能类型", dataIndex: "sys_func_type", width: 80, render: (v) => ({ "1": "纯数据", "2": "纯功能", "3": "数据+功能" })[v] || v || "-" },
+    { title: "是否盘点", dataIndex: "if_managed", width: 80, render: (v) => v === "1" ? <Tag color="blue">是</Tag> : <Tag>否</Tag> },
+    { title: "承建单位", dataIndex: "contractor_unit", width: 130, render: (v) => v || "-" },
+    { title: "承建部门", dataIndex: "contractor_department", width: 120, render: (v) => v || "-" },
+    { title: "承建负责人", dataIndex: "contractor_leader", width: 100, render: (v) => v || "-" },
+    { title: "负责人电话", dataIndex: "contractor_leader_phone", width: 120, render: (v) => v || "-" },
+    { title: "负责人邮箱", dataIndex: "contractor_leader_email", width: 160, render: (v) => v || "-" },
+    { title: "承建厂商", dataIndex: "construction_vendor", width: 160, render: (v) => v || "-" },
+    { title: "管理负责人", dataIndex: "management_leader", width: 100, render: (v) => v || "-" },
+    { title: "管理负责人电话", dataIndex: "management_leader_phone", width: 120, render: (v) => v || "-" },
+    { title: "管理负责人邮箱", dataIndex: "management_leader_email", width: 160, render: (v) => v || "-" },
+    { title: "运营单位", dataIndex: "operation_unit", width: 130, render: (v) => v || "-" },
+    { title: "运营部门", dataIndex: "operation_department", width: 120, render: (v) => v || "-" },
+    { title: "运营负责人", dataIndex: "operation_leader", width: 100, render: (v) => v || "-" },
+    { title: "运营负责人电话", dataIndex: "operation_leader_phone", width: 120, render: (v) => v || "-" },
+    { title: "运营负责人邮箱", dataIndex: "operation_leader_email", width: 160, render: (v) => v || "-" },
+    { title: "上线时间", dataIndex: "launch_time", width: 100, render: (v) => v || "-" },
+    { title: "项目编码", dataIndex: "project_code", width: 130, render: (v) => v || "-" },
+    { title: "项目名称", dataIndex: "project_name", width: 180, render: (v) => v || "-" },
+    { title: "合同编码", dataIndex: "contract_code", width: 140, render: (v) => v || "-" },
+    { title: "门户地址", dataIndex: "website", width: 140, render: (v) => v || "-" },
+    { title: "网信安编码", dataIndex: "netins_sys_id", width: 130, render: (v) => v || "-" },
+    { title: "主数据编码", dataIndex: "master_data_code", width: 130, render: (v) => v || "-" },
+    { title: "对外产数", dataIndex: "external_tag", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "操作类型", dataIndex: "oper_type", width: 80, render: (v) => ({ "0": "新增", "1": "修改", "2": "删除" })[v] || v || "-" },
+    { title: "更新时间", dataIndex: "oper_time", width: 140, render: (v) => v || "-" },
+    { title: "集团标识", dataIndex: "groupUniqueId", width: 180, ellipsis: true },
+    { title: "账期", dataIndex: "billMonth", width: 80 },
+    { title: "稽核状态", dataIndex: "auditStatus", width: 80, render: renderAuditStatus, fixed: "right" },
+    { title: "不合规原因", dataIndex: "nonCompliantReason", width: 160, ellipsis: true, render: (v) => v || "-", fixed: "right" },
+    { title: "操作", key: "action", width: 180, fixed: "right", render: (_, r) => (
+      <Space size="small" wrap>
+        {(!r.auditStatus || r.auditStatus === "pending" || r.auditStatus === "fail") && (
+          <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleResultAudit(r)}>稽核</Button>
+        )}
+        {r.auditStatus === "fail" && (
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
+        )}
+      </Space>
+    )},
   ]
+
+  const RESULT_MID_DATABASE_COLS = [
+    { title: "数据库标识", dataIndex: "midLocalBizId", width: 170, render: (v) => v || "-" },
+    { title: "数据库名", dataIndex: "db_name", width: 160, render: (v) => v || "-" },
+    { title: "数据库类型", dataIndex: "db_type", width: 120, render: (v) => v || "-" },
+    { title: "版本", dataIndex: "db_version", width: 100, render: (v) => v || "-" },
+    { title: "归属系统", dataIndex: "sys_code", width: 150, render: (v) => v || "-" },
+    { title: "IP", dataIndex: "db_ip", width: 130, render: (v) => v || "-" },
+    { title: "端口", dataIndex: "db_port", width: 80, render: (v) => v || "-" },
+    { title: "操作类型", dataIndex: "oper_type", width: 80, render: (v) => ({ "0": "新增", "1": "修改", "2": "删除" })[v] || v || "-" },
+    { title: "更新时间", dataIndex: "oper_time", width: 140, render: (v) => v || "-" },
+    { title: "集团标识", dataIndex: "groupUniqueId", width: 180, ellipsis: true },
+    { title: "账期", dataIndex: "billMonth", width: 80 },
+    { title: "稽核状态", dataIndex: "auditStatus", width: 80, render: renderAuditStatus, fixed: "right" },
+    { title: "不合规原因", dataIndex: "nonCompliantReason", width: 160, ellipsis: true, render: (v) => v || "-", fixed: "right" },
+    { title: "操作", key: "action", width: 180, fixed: "right", render: (_, r) => (
+      <Space size="small" wrap>
+        {(!r.auditStatus || r.auditStatus === "pending" || r.auditStatus === "fail") && (
+          <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleResultAudit(r)}>稽核</Button>
+        )}
+        {r.auditStatus === "fail" && (
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
+        )}
+      </Space>
+    )},
+  ]
+
+  const RESULT_MID_TABLE_COLS = [
+    { title: "表标识", dataIndex: "midLocalBizId", width: 180, render: (v) => v || "-" },
+    { title: "所属Schema", dataIndex: "table_schema", width: 100, render: (v) => v || "-" },
+    { title: "表英文名", dataIndex: "table_name_en", width: 140, render: (v) => v || "-" },
+    { title: "表中文名", dataIndex: "table_name", width: 160, render: (v) => v || "-" },
+    { title: "表简介", dataIndex: "table_introduct", width: 200, ellipsis: true, render: (v) => v || "-" },
+    { title: "所属库", dataIndex: "db_local_biz_id", width: 170, render: (v) => v || "-" },
+    { title: "主题域", dataIndex: "table_domain", width: 100, render: (v) => v || "-" },
+    { title: "场景标签", dataIndex: "scenario_tag", width: 100, render: (v) => v || "-" },
+    { title: "湖数据类型", dataIndex: "lake_data_type", width: 100, render: (v) => v || "-" },
+    { title: "是否入湖", dataIndex: "in_unit_lakes", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "湖内精模型", dataIndex: "premium_model_in_lake", width: 90, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "是否上传湖", dataIndex: "uploaded_to_big_lake", width: 90, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "湖外唯一标识", dataIndex: "external_unique_identifier", width: 160, render: (v) => v || "-" },
+    { title: "可共享", dataIndex: "is_shareable", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "是否已共享", dataIndex: "is_shared", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "共享渠道", dataIndex: "sharing_channel", width: 100, render: (v) => v || "-" },
+    { title: "技术联系人", dataIndex: "tech_contact", width: 100, render: (v) => v || "-" },
+    { title: "技术人电话", dataIndex: "tech_contact_phone", width: 110, render: (v) => v || "-" },
+    { title: "汇聚方式", dataIndex: "data_aggregation_method", width: 100, render: (v) => v || "-" },
+    { title: "采集时间", dataIndex: "data_collection_time", width: 100, render: (v) => v || "-" },
+    { title: "汇聚粒度", dataIndex: "aggregation_granularity", width: 100, render: (v) => v || "-" },
+    { title: "增量/全量", dataIndex: "is_incremental_or_full", width: 90, render: (v) => v || "-" },
+    { title: "存储周期", dataIndex: "storage_period", width: 100, render: (v) => v || "-" },
+    { title: "引用次数", dataIndex: "reference_count", width: 80, render: (v) => v || "-" },
+    { title: "订阅次数", dataIndex: "sub_count", width: 80, render: (v) => v || "-" },
+    { title: "收藏次数", dataIndex: "col_count", width: 80, render: (v) => v || "-" },
+    { title: "访问次数", dataIndex: "access_count", width: 80, render: (v) => v || "-" },
+    { title: "表分级", dataIndex: "table_level", width: 80, render: (v) => v || "-" },
+    { title: "表分类", dataIndex: "tabtable_category", width: 80, render: (v) => v || "-" },
+    { title: "层级", dataIndex: "layer_level", width: 80, render: (v) => v || "-" },
+    { title: "业务域", dataIndex: "business_domain", width: 100, render: (v) => v || "-" },
+    { title: "数据来源系统", dataIndex: "source_system", width: 120, render: (v) => v || "-" },
+    { title: "创建时间", dataIndex: "create_time", width: 140, render: (v) => v || "-" },
+    { title: "是否分区", dataIndex: "is_partitioned", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "数据质量", dataIndex: "data_quality", width: 80, render: (v) => v || "-" },
+    { title: "行业目录", dataIndex: "industry_catalog", width: 100, render: (v) => v || "-" },
+    { title: "行业专家", dataIndex: "industry_expert", width: 100, render: (v) => v || "-" },
+    { title: "集团湖接口表名", dataIndex: "group_gather_tbname", width: 150, render: (v) => v || "-" },
+    { title: "操作类型", dataIndex: "oper_type", width: 80, render: (v) => ({ "0": "新增", "1": "修改", "2": "删除" })[v] || v || "-" },
+    { title: "更新时间", dataIndex: "oper_time", width: 140, render: (v) => v || "-" },
+    { title: "集团标识", dataIndex: "groupUniqueId", width: 180, ellipsis: true },
+    { title: "账期", dataIndex: "billMonth", width: 80 },
+    { title: "稽核状态", dataIndex: "auditStatus", width: 80, render: renderAuditStatus, fixed: "right" },
+    { title: "不合规原因", dataIndex: "nonCompliantReason", width: 160, ellipsis: true, render: (v) => v || "-", fixed: "right" },
+    { title: "操作", key: "action", width: 180, fixed: "right", render: (_, r) => (
+      <Space size="small" wrap>
+        {(!r.auditStatus || r.auditStatus === "pending" || r.auditStatus === "fail") && (
+          <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleResultAudit(r)}>稽核</Button>
+        )}
+        {r.auditStatus === "fail" && (
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
+        )}
+      </Space>
+    )},
+  ]
+
+  const RESULT_MID_FIELD_COLS = [
+    { title: "所属表", dataIndex: "tbl_local_biz_id", width: 170, render: (v) => v || "-" },
+    { title: "字段英文名", dataIndex: "field_name_en", width: 140, render: (v) => v || "-" },
+    { title: "字段中文名", dataIndex: "field_name_cn", width: 140, render: (v) => v || "-" },
+    { title: "字段类型", dataIndex: "field_type", width: 100, render: (v) => v || "-" },
+    { title: "字段长度", dataIndex: "field_length", width: 80, render: (v) => v || "-" },
+    { title: "字段描述", dataIndex: "field_desc", width: 200, ellipsis: true, render: (v) => v || "-" },
+    { title: "加工口径说明", dataIndex: "process_caliber_desc", width: 160, ellipsis: true, render: (v) => v || "-" },
+    { title: "是否主键", dataIndex: "is_primary_key", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "是否外键", dataIndex: "is_foreign_key", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "可共享", dataIndex: "is_shareable", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "字段分类", dataIndex: "field_category", width: 100, render: (v) => v || "-" },
+    { title: "敏感级别", dataIndex: "sensitivity_level", width: 80, render: (v) => v || "-" },
+    { title: "敏感元素", dataIndex: "sensitive_field_elements", width: 120, render: (v) => v || "-" },
+    { title: "是否脱敏", dataIndex: "is_desensitized", width: 80, render: (v) => v === "1" ? "是" : v || "-" },
+    { title: "取值定义", dataIndex: "value_definition", width: 120, render: (v) => v || "-" },
+    { title: "引用主数据字段", dataIndex: "mdm_field", width: 140, render: (v) => v || "-" },
+    { title: "引用主数据类型", dataIndex: "mdm_type", width: 120, render: (v) => v || "-" },
+    { title: "操作类型", dataIndex: "oper_type", width: 80, render: (v) => ({ "0": "新增", "1": "修改", "2": "删除" })[v] || v || "-" },
+    { title: "更新时间", dataIndex: "oper_time", width: 140, render: (v) => v || "-" },
+    { title: "集团标识", dataIndex: "groupUniqueId", width: 180, ellipsis: true },
+    { title: "账期", dataIndex: "billMonth", width: 80 },
+    { title: "稽核状态", dataIndex: "auditStatus", width: 80, render: renderAuditStatus, fixed: "right" },
+    { title: "不合规原因", dataIndex: "nonCompliantReason", width: 160, ellipsis: true, render: (v) => v || "-", fixed: "right" },
+    { title: "操作", key: "action", width: 180, fixed: "right", render: (_, r) => (
+      <Space size="small" wrap>
+        {(!r.auditStatus || r.auditStatus === "pending" || r.auditStatus === "fail") && (
+          <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleResultAudit(r)}>稽核</Button>
+        )}
+        {r.auditStatus === "fail" && (
+          <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
+        )}
+      </Space>
+    )},
+  ]
+
+  // ─── 集团结果表列定义（带删除操作） ─────────────
+
+  const GROUP_RESULT_SYSTEM_COLS = RESULT_MID_SYSTEM_COLS.map(col => {
+    if (col.key === "action") {
+      return {
+        ...col,
+        render: (_, r) => (
+          <Space size="small">
+            <Button size="small" danger icon={<DeleteOutlined />}
+              onClick={() => handleDeleteFromGroup(r)}>删除系统及其下级</Button>
+          </Space>
+        ),
+      }
+    }
+    return col
+  })
+
+  const GROUP_RESULT_DATABASE_COLS = RESULT_MID_DATABASE_COLS
+    .filter(col => col.dataIndex !== "midLocalBizId") // 数据库标识在集团结果表中无对应数据
+    .map(col => {
+      if (col.key === "action") {
+        return {
+          ...col,
+          render: (_, r) => (
+            <Space size="small">
+              <Button size="small" danger icon={<DeleteOutlined />}
+                onClick={() => handleDeleteFromGroup(r)}>删除库及其下级</Button>
+            </Space>
+          ),
+        }
+      }
+      return col
+    })
+
+  const GROUP_RESULT_TABLE_COLS = RESULT_MID_TABLE_COLS
+    .filter(col => col.dataIndex !== "midLocalBizId" && col.dataIndex !== "table_schema") // 集团结果表中无对应数据
+    .map(col => {
+      if (col.key === "action") {
+        return { ...col, render: () => <span style={{ color: "#999" }}>—</span> }
+      }
+      return col
+    })
+
+  const GROUP_RESULT_FIELD_COLS = RESULT_MID_FIELD_COLS.map(col => {
+    if (col.key === "action") {
+      return { ...col, render: () => <span style={{ color: "#999" }}>—</span> }
+    }
+    return col
+  })
+
+  // 各资产类型的列定义映射
+  const RESULT_COLS_MAP = {
+    system: RESULT_MID_SYSTEM_COLS,
+    database: RESULT_MID_DATABASE_COLS,
+    table: RESULT_MID_TABLE_COLS,
+    field: RESULT_MID_FIELD_COLS,
+  }
+
+  const GROUP_COLS_MAP = {
+    system: GROUP_RESULT_SYSTEM_COLS,
+    database: GROUP_RESULT_DATABASE_COLS,
+    table: GROUP_RESULT_TABLE_COLS,
+    field: GROUP_RESULT_FIELD_COLS,
+  }
+
+  // Compute columns based on view mode and current level
+  const getColumns = () => {
+    if (viewMode === "group-result") {
+      return GROUP_COLS_MAP[currentLevel] || []
+    }
+    if (viewMode === "result-mid") {
+      return RESULT_COLS_MAP[currentLevel] || []
+    }
+    // mid table
+    return [
+      ...(TYPE_COLUMNS[currentLevel] || []),
+      { title: "稽核状态", dataIndex: "audit_status", width: 90, render: renderAuditStatus },
+      { title: "不合规原因", dataIndex: "non_compliant_reason", width: 200, ellipsis: true,
+        render: (v) => v ? <span title={v}>{v.length > 20 ? v.slice(0, 20) + "..." : v}</span> : "-" },
+      { title: "上传状态", dataIndex: "upload_status", width: 90, render: renderUploadStatus },
+      { title: "操作", key: "action", width: 260, fixed: "right", render: (_, r) => actionButtons(r) },
+    ]
+  }
 
   return (
     <div>
@@ -574,12 +1065,12 @@ export default function ResourceUploadV2() {
           description="请及时完成盘点范围内的库表上传。"
           style={{ marginBottom: 16 }} />
       )}
-      {/* 级联选择栏 */}
-      <div style={{ marginBottom: 12, padding: 16, background: "#fafafa", borderRadius: 4, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      {/* 级联选择栏 - 中间表和中间结果表模式显示 */}
+      {(viewMode === "mid" || viewMode === "result-mid") && <div style={{ marginBottom: 12, padding: 16, background: "#fafafa", borderRadius: 4, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontWeight: "bold", whiteSpace: "nowrap" }}>级联筛选：</span>
         <Select placeholder="选择系统" allowClear showSearch style={{ width: 200 }}
-          value={selectedPath.system}
-          onChange={(v, opt) => handleCascadeChange("system", opt)}
+          value={selectedPath.system?.localBizId}
+          onChange={(v, opt) => handleCascadeChange("system", v, opt)}
           filterOption={(input, option) => option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0}>
           {cascadeOpts.system.map((o) => (
             <Option key={o.localBizId} value={o.localBizId} localBizId={o.localBizId} sysName={o.sysName} sysCode={o.sysCode}>
@@ -588,16 +1079,16 @@ export default function ResourceUploadV2() {
           ))}
         </Select>
         <Select placeholder="选择数据库" allowClear showSearch style={{ width: 200 }}
-          value={selectedPath.database} disabled={!selectedPath.system}
-          onChange={(v, opt) => handleCascadeChange("database", opt)}
+          value={selectedPath.database?.localBizId} disabled={!selectedPath.system}
+          onChange={(v, opt) => handleCascadeChange("database", v, opt)}
           filterOption={(input, option) => option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0}>
           {cascadeOpts.database.map((o) => (
             <Option key={o.localBizId} value={o.localBizId} localBizId={o.localBizId} dbName={o.dbName}>{o.dbName}</Option>
           ))}
         </Select>
         <Select placeholder="选择表" allowClear showSearch style={{ width: 200 }}
-          value={selectedPath.table} disabled={!selectedPath.database}
-          onChange={(v, opt) => handleCascadeChange("table", opt)}
+          value={selectedPath.table?.localBizId} disabled={!selectedPath.database}
+          onChange={(v, opt) => handleCascadeChange("table", v, opt)}
           filterOption={(input, option) => option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0}>
           {cascadeOpts.table.map((o) => (
             <Option key={o.localBizId} value={o.localBizId} localBizId={o.localBizId} tableName={o.tableName || o.tableNameEn}>
@@ -606,8 +1097,8 @@ export default function ResourceUploadV2() {
           ))}
         </Select>
         <Select placeholder="选择字段" allowClear showSearch style={{ width: 200 }}
-          value={selectedPath.field} disabled={!selectedPath.table}
-          onChange={(v, opt) => handleCascadeChange("field", opt)}
+          value={selectedPath.field?.localBizId} disabled={!selectedPath.table}
+          onChange={(v, opt) => handleCascadeChange("field", v, opt)}
           filterOption={(input, option) => option.children.toLowerCase().indexOf(input.toLowerCase()) >= 0}>
           {cascadeOpts.field.map((o) => (
             <Option key={o.localBizId} value={o.localBizId} localBizId={o.localBizId} fieldNameCn={o.fieldNameCn}>
@@ -615,18 +1106,35 @@ export default function ResourceUploadV2() {
             </Option>
           ))}
         </Select>
-      </div>
+      </div>}
 
-      {/* 面包屑导航 */}
-      <div style={{ marginBottom: 12 }}>
+      {(viewMode === "mid" || viewMode === "result-mid") && <div style={{ marginBottom: 12 }}>
         <Breadcrumb items={getBreadcrumbItems()} />
-      </div>
+      </div>}
 
-      {/* 账期显示 */}
-      <Descriptions size="small" style={{ marginBottom: 8 }}>
-        <Descriptions.Item label="当前账期">{billMonth}</Descriptions.Item>
-        <Descriptions.Item label="账期周期">上月26日 - 本月25日</Descriptions.Item>
-      </Descriptions>
+      {/* 账期显示/选择 */}
+      {viewMode === "result-mid" ? (
+        <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontWeight: "bold" }}>账期：</span>
+          <Select value={billMonth} onChange={(v) => { setBillMonth(v) }}
+            style={{ width: 120 }}
+            options={availableBillMonths.map(m => ({ value: m, label: m }))} />
+          <span style={{ color: "#888", fontSize: 12 }}>上月26日 - 本月25日</span>
+        </div>
+      ) : viewMode === "group-result" ? (
+        <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontWeight: "bold" }}>账期：</span>
+          <Select value={billMonth} onChange={(v) => { setBillMonth(v) }}
+            style={{ width: 120 }} allowClear placeholder="全部账期"
+            options={availableBillMonths.map(m => ({ value: m, label: m }))} />
+          <span style={{ color: "#888", fontSize: 12 }}>留空查看所有账期数据</span>
+        </div>
+      ) : (
+        <Descriptions size="small" style={{ marginBottom: 8 }}>
+          <Descriptions.Item label="当前账期">{billMonth}</Descriptions.Item>
+          <Descriptions.Item label="账期周期">上月26日 - 本月25日</Descriptions.Item>
+        </Descriptions>
+      )}
 
       {/* 合并建议通知 */}
       {mergeSuggestions.length > 0 && (
@@ -637,17 +1145,45 @@ export default function ResourceUploadV2() {
           style={{ marginBottom: 12 }} closable onClose={() => setMergeSuggestions([])} />
       )}
 
-      {/* 操作按钮 */}
-      <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {/* 操作按钮 - 根据视图模式显示不同按钮 */}
+      {viewMode === "mid" && <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
         <Button icon={<SyncOutlined />} onClick={() => handleSync("all")}>同步到中间表</Button>
         <Button icon={<SafetyCertificateOutlined />} onClick={() => handleAudit("all")}>触发稽核</Button>
         <Button icon={<SendOutlined />} onClick={() => handleSyncToResultMid("all")}>同步到中间结果表</Button>
-        <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => handleConfirmUpload("all")}>确认上传集团</Button>
+      </div>}
+      {viewMode === "result-mid" && <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Button icon={<SafetyCertificateOutlined />}
+          onClick={handleResultMidAudit}>触发稽核{selectedResultKeys.length ? `（${selectedResultKeys.length}条）` : ""}</Button>
+        <Button type="primary" icon={<CloudUploadOutlined />}
+          onClick={() => handleResultUploadSelected(false)}
+          disabled={!selectedResultKeys.length}>确认上传集团（{selectedResultKeys.length}）</Button>
+        {currentLevel === "system" && (
+          <Button type="primary" icon={<CloudUploadOutlined />}
+            onClick={() => handleResultUploadSelected(true)}
+            disabled={!selectedResultKeys.length}>级联上传集团（含下级）</Button>
+        )}
+        {currentLevel === "system" && (
+          <Button icon={<CloudUploadOutlined />}
+            onClick={async () => {
+              const res = await api.post("/upload/confirm-upload", {
+                asset_type: currentLevel,
+                bill_month: billMonth,
+                cascade: true,
+              })
+              if (res.code === "000000") {
+                message.success(`全量级联上传成功: ${res.data.successCount}条`)
+                fetchData()
+              }
+            }}>全量级联上传（全部）</Button>
+        )}
         <Button icon={<HistoryOutlined />} onClick={() => navigate("/upload/modify-log")}>修改记录</Button>
         <Button icon={<HistoryOutlined />} onClick={() => navigate("/upload/upload-log")}>上传记录</Button>
         <Button icon={<StopOutlined />} onClick={() => navigate("/upload/exclude-marks")}>排除标记</Button>
-        <Button icon={<MergeCellsOutlined />} onClick={() => navigate("/upload/merge-logs")}>合并日志</Button>
-      </div>
+        <Button icon={<DatabaseOutlined />} onClick={() => navigate("/upload/merge-logs")}>合并日志</Button>
+      </div>}
+      {viewMode === "group-result" && <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Button icon={<AuditOutlined />} onClick={handleGroupAudit}>全量稽核{selectedPath[currentLevel]?.localBizId ? `（${LEVEL_LABELS[currentLevel]}级联范围）` : ""}</Button>
+      </div>}
 
       {/* 视图切换 */}
       <Tabs activeKey={viewMode} onChange={setViewMode} style={{ marginBottom: 8 }}
@@ -657,23 +1193,24 @@ export default function ResourceUploadV2() {
           { key: "group-result", label: "集团结果表（全量）" },
         ]} />
 
-      {/* 层级页签 — 让用户手动切换查看系统/数据库/表/字段 */}
+      {/* 层级页签 — 所有视图都显示支持下钻 */}
       <Tabs activeKey={currentLevel} onChange={setCurrentLevel}
         style={{ marginBottom: 8 }}
         items={LEVELS.map(t => ({ key: t, label: LEVEL_LABELS[t] }))} />
-
-      {/* 当前层级标题 */}
       <div style={{ marginBottom: 8, color: "#666" }}>
-        {getLevelTitle()}（共 {pagination.total} 条）
+        {viewMode === "mid" ? getLevelTitle() : (viewMode === "result-mid" ? "中间结果表" : "集团结果表")}（共 {pagination.total} 条）
       </div>
 
       {/* 数据表格 */}
       <Table
-        rowKey="local_biz_id"
-        rowSelection={{ selectedRowKeys, onChange: setSelectedRowKeys }}
-        columns={columns} dataSource={data} loading={loading} size="small"
+        rowKey={viewMode === "mid" ? "local_biz_id" : "id"}
+        rowSelection={viewMode === "mid" ? { selectedRowKeys, onChange: setSelectedRowKeys } : (viewMode === "result-mid" ? {
+          selectedRowKeys: selectedResultKeys,
+          onChange: setSelectedResultKeys,
+        } : undefined)}
+        columns={getColumns()} dataSource={data} loading={loading} size="small"
         pagination={{ ...pagination, showSizeChanger: true, onChange: (p, s) => fetchData(p, s) }}
-        scroll={{ x: 1200 }}
+        scroll={{ x: "max-content" }}
         onRow={(record) => ({
           style: { cursor: LEVELS.indexOf(currentLevel) < LEVELS.length - 1 ? "pointer" : "default" },
           onDoubleClick: () => handleRowClick(record),
