@@ -79,16 +79,51 @@ export default function MergeLogView() {
       <Modal title="合并详情" open={detailVisible}
         onCancel={() => setDetailVisible(false)} footer={null} width={640}>
         {detailData && (
-          <Descriptions bordered column={1} size="small">
-            <Descriptions.Item label="资产类型">{ASSET_TYPE_LABELS[detailData.assetType] || detailData.assetType}</Descriptions.Item>
-            <Descriptions.Item label="合并目标标识">{detailData.targetLocalBizId}</Descriptions.Item>
-            <Descriptions.Item label="来源记录标识">
-              {Array.isArray(detailData.sourceLocalBizIds) ? detailData.sourceLocalBizIds.join(", ") : "-"}
-            </Descriptions.Item>
-            <Descriptions.Item label="合并原因">{detailData.mergeReason}</Descriptions.Item>
-            <Descriptions.Item label="操作人">{detailData.operator}</Descriptions.Item>
-            <Descriptions.Item label="操作时间">{detailData.createTime}</Descriptions.Item>
-          </Descriptions>
+          <div>
+            <Descriptions bordered column={1} size="small">
+              <Descriptions.Item label="资产类型">{ASSET_TYPE_LABELS[detailData.assetType] || detailData.assetType}</Descriptions.Item>
+              <Descriptions.Item label="合并原因">{detailData.mergeReason}</Descriptions.Item>
+              <Descriptions.Item label="操作人">{detailData.operator}</Descriptions.Item>
+              <Descriptions.Item label="操作时间">{detailData.createTime}</Descriptions.Item>
+            </Descriptions>
+
+            {/* 解析 mergeDetail */}
+            {detailData.mergeDetail && detailData.mergeDetail.primary ? (() => {
+              const md = detailData.mergeDetail
+              return (
+                <div style={{ marginTop: 16 }}>
+                  <h4 style={{ color: "#1890ff", marginBottom: 8 }}>系统合并详情</h4>
+                  <Descriptions bordered column={1} size="small">
+                    <Descriptions.Item label={<span style={{ color: "#1890ff", fontWeight: "bold" }}>✅ 主系统</span>}>
+                      <Tag color="blue" style={{ fontWeight: "bold" }}>{md.primary.name || md.primary.id}</Tag>
+                      {md.primary.code ? `（${md.primary.code}）` : ""}
+                      <span style={{ color: "#999", marginLeft: 8 }}>ID: {md.primary.id}</span>
+                    </Descriptions.Item>
+                    {md.secondary && md.secondary.length > 0 && (
+                      <Descriptions.Item label={<span style={{ color: "#fa8c16", fontWeight: "bold" }}>📌 副系统（{md.secondary.length}个）</span>}>
+                        {md.secondary.map((s, idx) => (
+                          <div key={s.id} style={{ marginBottom: idx < md.secondary.length - 1 ? 6 : 0 }}>
+                            <Tag color="orange">{s.name || s.id}</Tag>
+                            {s.code ? `（${s.code}）` : ""}
+                            <span style={{ color: "#999", marginLeft: 8 }}>ID: {s.id}</span>
+                          </div>
+                        ))}
+                      </Descriptions.Item>
+                    )}
+                  </Descriptions>
+                </div>
+              )
+            })() : (
+              <div style={{ marginTop: 16 }}>
+                <Descriptions bordered column={1} size="small">
+                  <Descriptions.Item label="合并目标标识">{detailData.targetLocalBizId}</Descriptions.Item>
+                  <Descriptions.Item label="来源记录标识">
+                    {Array.isArray(detailData.sourceLocalBizIds) ? detailData.sourceLocalBizIds.join(", ") : "-"}
+                  </Descriptions.Item>
+                </Descriptions>
+              </div>
+            )}
+          </div>
         )}
       </Modal>
     </div>

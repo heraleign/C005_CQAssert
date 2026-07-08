@@ -9,7 +9,7 @@ from app.schemas.upload import (
     SyncToResultRequest, UploadToGroupRequest, MidListQuery,
     SyncToResultMidRequest, ConfirmUploadRequest,
     MarkExcludeRequest, MergeRecordsRequest,
-    DeleteGroupResultRequest,
+    DeleteGroupResultRequest, MergeSystemsRequest,
 )
 from app.upload_engine import UploadEngine
 
@@ -72,6 +72,15 @@ def mid_list(
     sys_func_type: Optional[str] = None,
     if_managed: Optional[str] = None,
     upload_flag: Optional[str] = None,
+    # 新增筛选条件（评审意见1）
+    create_time_start: Optional[str] = None,
+    create_time_end: Optional[str] = None,
+    update_time_start: Optional[str] = None,
+    update_time_end: Optional[str] = None,
+    # 新增：是否已上传集团（评审意见11）
+    group_uploaded: Optional[int] = None,
+    # 新增：主/副系统（评审意见5）
+    is_primary: Optional[int] = None,
     page: int = Query(1),
     size: int = Query(10),
     db: Session = Depends(get_db),
@@ -92,6 +101,16 @@ def mid_list(
                  ("upload_flag", upload_flag)]:
         if v:
             filters[k] = v
+    # 新增时间范围筛选
+    for k, v in [("create_time_start", create_time_start), ("create_time_end", create_time_end),
+                 ("update_time_start", update_time_start), ("update_time_end", update_time_end)]:
+        if v:
+            filters[k] = v
+    # 新增精确筛选
+    if group_uploaded is not None:
+        filters["group_uploaded"] = group_uploaded
+    if is_primary is not None:
+        filters["is_primary"] = is_primary
 
     data = engine.query_mid_list(asset_type, filters, page, size)
     return CommonResponse(data=data)
@@ -183,6 +202,19 @@ def merge_records(req: MergeRecordsRequest, engine: UploadEngine = Depends(get_e
     return CommonResponse(data=data)
 
 
+# ─── 新增：合并系统（评审意见5） ─────────────────
+
+@router.post("/merge-systems")
+def merge_systems(req: MergeSystemsRequest, engine: UploadEngine = Depends(get_engine)):
+    """合并系统：勾选两个或多个系统，指定一个主系统，其余为副系统"""
+    data = engine.merge_systems(
+        source_ids=req.source_ids,
+        target_id=req.target_id,
+        merge_reason=req.merge_reason,
+    )
+    return CommonResponse(data=data)
+
+
 # ─── 新增：查询 endpoints ─────────────────────
 
 @router.get("/result-mid-list")
@@ -214,6 +246,7 @@ def group_result_list(
     asset_type: Optional[str] = None,
     group_unique_id: Optional[str] = None,
     bill_month: Optional[str] = None,
+    include_disabled: bool = Query(False, description="是否包含已禁用的历史记录"),
     page: int = Query(1),
     size: int = Query(10),
     db: Session = Depends(get_db),
@@ -222,7 +255,8 @@ def group_result_list(
     engine = UploadEngine(db)
     data = engine.query_group_result_list(
         asset_type=asset_type, group_unique_id=group_unique_id,
-        bill_month=bill_month, page=page, size=size,
+        bill_month=bill_month, include_disabled=include_disabled,
+        page=page, size=size,
     )
     return CommonResponse(data=data)
 

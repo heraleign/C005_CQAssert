@@ -69,6 +69,19 @@ class UploadMidSystem(Base):
     oper_type = Column(String(10), comment="0新增/1修改/2删除")
     oper_time = Column(String(20), comment="操作时间")
 
+    # 新增字段：创建/更新时间（评审意见1、3）
+    create_time = Column(DateTime, server_default=func.now(), comment="创建时间")
+    update_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
+
+    # 新增字段：合并系统标识（评审意见5）
+    is_primary = Column(SmallInteger, default=1, comment="1=主系统 0=副系统")
+    primary_system_id = Column(String(255), comment="所属主系统的local_biz_id，副系统使用")
+    primary_sys_name = Column(String(255), comment="所属主系统的名称，副系统使用")
+    primary_sys_code = Column(String(255), comment="所属主系统的编码，副系统使用")
+
+    # 新增字段：是否已上传集团（评审意见11）
+    group_uploaded = Column(SmallInteger, default=0, comment="0=未上传集团 1=已上传集团")
+
 
 class UploadMidDatabase(Base):
     """资源类-数据库中间表"""
@@ -97,6 +110,10 @@ class UploadMidDatabase(Base):
     last_sync_time = Column(DateTime)
     oper_type = Column(String(10))
     oper_time = Column(String(20))
+
+    # 新增字段：创建/更新时间
+    create_time = Column(DateTime, server_default=func.now(), comment="创建时间")
+    update_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
 
 
 class UploadMidTable(Base):
@@ -158,6 +175,10 @@ class UploadMidTable(Base):
     oper_type = Column(String(10))
     oper_time = Column(String(20))
 
+    # 新增字段：创建/更新时间
+    create_time = Column(DateTime, server_default=func.now(), comment="创建时间")
+    update_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
+
 
 class UploadMidField(Base):
     """资源类-字段中间表"""
@@ -196,6 +217,10 @@ class UploadMidField(Base):
     last_sync_time = Column(DateTime)
     oper_type = Column(String(10))
     oper_time = Column(String(20))
+
+    # 新增字段：创建/更新时间
+    create_time = Column(DateTime, server_default=func.now(), comment="创建时间")
+    update_time = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
 
 
 # ─── 支持表 ─────────────────────────────────────────────
@@ -301,6 +326,9 @@ class UploadGroupResult(Base):
     sync_time = Column(DateTime, comment="同步时间")
     oper_type = Column(String(10), comment="操作类型")
     oper_time = Column(String(20), comment="操作时间")
+
+    # 新增字段：记录状态（评审意见4）
+    record_status = Column(String(20), default="active", comment="active=有效 disabled=已禁用")
 
 
 class ExcludeMark(Base):

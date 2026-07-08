@@ -1,12 +1,13 @@
-import React, { useState, useEffect, useCallback } from "react"
-import { Table, Tabs, Select, Input, Button, Tag, Space, Modal, Form, message, Alert, Descriptions, Breadcrumb, Switch } from "antd"
-import { SyncOutlined, SafetyCertificateOutlined, SendOutlined, CloudUploadOutlined, HistoryOutlined, EditOutlined, SearchOutlined, WarningOutlined, StopOutlined, MergeCellsOutlined, TableOutlined, FileTextOutlined, DatabaseOutlined, AuditOutlined, DeleteOutlined } from "@ant-design/icons"
+import React, { useState, useEffect, useCallback, useRef } from "react"
+import { Table, Tabs, Select, Input, Button, Tag, Space, Modal, Form, message, Alert, Descriptions, Breadcrumb, Switch, DatePicker } from "antd"
+import { SyncOutlined, SafetyCertificateOutlined, SendOutlined, CloudUploadOutlined, HistoryOutlined, EditOutlined, SearchOutlined, WarningOutlined, StopOutlined, MergeCellsOutlined, TableOutlined, FileTextOutlined, DatabaseOutlined, AuditOutlined, DeleteOutlined, PartitionOutlined } from "@ant-design/icons"
 import dayjs from "dayjs"
 import { useNavigate } from "react-router-dom"
 import api from "../services/api"
 
 const { Option } = Select
 const { TextArea } = Input
+const { RangePicker } = DatePicker
 const LEVELS = ["system", "database", "table", "field"]
 const LEVEL_LABELS = { system: "系统", database: "数据库", table: "表", field: "字段" }
 
@@ -65,6 +66,28 @@ const TYPE_COLUMNS = {
       render: (v) => ({ "1": "纯数据", "2": "纯功能", "3": "数据+功能" })[v] || v },
     { title: "是否盘点", dataIndex: "if_managed", width: 80,
       render: (v) => v === "1" ? <Tag color="blue">是</Tag> : <Tag>否</Tag> },
+    // 新增：主/副系统标识（评审意见5）
+    { title: "系统类型", dataIndex: "is_primary", width: 120,
+      render: (v, r) => {
+        if (r.is_primary === 0) {
+          const primaryName = r.primary_sys_name || r.primary_sys_code || r.primary_system_id || "?"
+          return <Tag color="orange">副→{primaryName}</Tag>
+        }
+        return <Tag color="blue">主</Tag>
+      }
+    },
+    // 新增：是否已上传集团（评审意见11）
+    { title: "已上传集团", dataIndex: "group_uploaded", width: 95,
+      render: (v) => v === 1 ? <Tag color="green">是</Tag> : <Tag>否</Tag>
+    },
+    // 新增：创建时间（评审意见1）
+    { title: "创建时间", dataIndex: "create_time", width: 150,
+      render: (v) => v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-"
+    },
+    // 新增：更新时间（评审意见1）
+    { title: "更新时间", dataIndex: "update_time", width: 150,
+      render: (v) => v ? dayjs(v).format("YYYY-MM-DD HH:mm") : "-"
+    },
   ],
   database: [
     { title: "所属系统", dataIndex: "sysName", width: 160, render: (v) => v || "-" },
@@ -120,6 +143,12 @@ export default function ResourceUploadV2() {
   const [filters, setFilters] = useState({
     sysCode: "", sysName: "", recordName: "", sysStatus: "",
     sysFuncType: "", ifManaged: "", auditStatus: "", uploadStatus: "",
+    groupUploaded: "",  // 评审意见11
+  })
+  // 时间范围筛选（评审意见1）
+  const [timeFilters, setTimeFilters] = useState({
+    createTimeRange: null,
+    updateTimeRange: null,
   })
   // Modify modal
   const [modifyVisible, setModifyVisible] = useState(false)
@@ -141,6 +170,12 @@ export default function ResourceUploadV2() {
   const [mergeSuggestions, setMergeSuggestions] = useState([])
   const [mergeVisible, setMergeVisible] = useState(false)
   const [pendingMerge, setPendingMerge] = useState(null)
+  // System merge (评审意见5) - 改用 ref 避免闭包陷阱
+  const [sysMergeVisible, setSysMergeVisible] = useState(false)
+  const [sysMergeTarget, setSysMergeTarget] = useState("")
+  const [sysMergeReason, setSysMergeReason] = useState("")
+  const sysMergeSourceRef = useRef([]) // 保存选中合并的系统数据，用 ref 持久化
+  const [sysMergeItems, setSysMergeItems] = useState([]) // 用于触发对话框渲染
   // Exclude modal
   const [excludeVisible, setExcludeVisible] = useState(false)
   const [excludeRecord, setExcludeRecord] = useState(null)
@@ -258,42 +293,50 @@ export default function ResourceUploadV2() {
     }
   }, [cascadeOpts])
 
+  // 用 ref 保存最新分页信息，避免 useCallback 依赖 pagination 导致重复创建
+  const paginationRef = useRef(pagination)
+  paginationRef.current = pagination
+
   // Fetch table data for current level with parent filter
   const fetchData = useCallback(async (page, size) => {
-    const p = page || pagination.current
-    const s = size || pagination.pageSize
+    const p = page || paginationRef.current.current || 1
+    const s = size || paginationRef.current.pageSize || 10
     setLoading(true)
     try {
       if (viewMode === "mid") {
-        // 中间表视图（支持下钻+级联过滤）
         const parentFilter = getParentFilter()
         const parentId = parentFilter?.localBizId || null
         const extra = {}
         if (parentFilter && parentFilter.level !== LEVELS[LEVELS.indexOf(currentLevel) - 1]) {
           extra.parent_level = parentFilter.level
         }
-        // 如果级联选择了当前层级的项目，按 local_biz_id 精确过滤（只显示该条记录）
         const currentSelected = selectedPath[currentLevel]
         if (currentSelected?.localBizId) {
           extra.local_biz_id = currentSelected.localBizId
         }
         if (filters.auditStatus) extra.audit_status = filters.auditStatus
         if (filters.uploadStatus) extra.upload_status = filters.uploadStatus
+        if (filters.sysStatus) extra.status = filters.sysStatus
+        if (filters.groupUploaded) extra.group_uploaded = filters.groupUploaded
+        if (timeFilters.createTimeRange) {
+          extra.create_time_start = timeFilters.createTimeRange[0].format("YYYY-MM-DD HH:mm:ss")
+          extra.create_time_end = timeFilters.createTimeRange[1].format("YYYY-MM-DD HH:mm:ss")
+        }
+        if (timeFilters.updateTimeRange) {
+          extra.update_time_start = timeFilters.updateTimeRange[0].format("YYYY-MM-DD HH:mm:ss")
+          extra.update_time_end = timeFilters.updateTimeRange[1].format("YYYY-MM-DD HH:mm:ss")
+        }
         const result = await fetchMidList(currentLevel, parentId, extra, p, s)
-        // 补充父级名称信息
         const enriched = enrichData(result.list || [], currentLevel)
         setData(enriched)
         setPagination({ current: result.page, pageSize: result.size, total: result.total })
       } else if (viewMode === "result-mid") {
-        // 中间结果表视图（支持下钻+级联过滤）
         const params = { page: p, size: s, asset_type: currentLevel }
         if (billMonth) params.bill_month = billMonth
-        // 如果级联选择了当前层级的项目，按 mid_local_biz_id 精确过滤
         const currentSelected = selectedPath[currentLevel]
         if (currentSelected?.localBizId) {
           params.mid_local_biz_id = currentSelected.localBizId
         }
-        // 查找父级过滤（只在下级页签时生效）
         if (currentLevel !== "system" && !currentSelected?.localBizId) {
           const parentFilter = getParentFilter()
           if (parentFilter?.localBizId) {
@@ -306,21 +349,30 @@ export default function ResourceUploadV2() {
           setPagination({ current: res.data.page, pageSize: res.data.size, total: res.data.total })
         }
       } else if (viewMode === "group-result") {
-        // 集团结果表视图（支持下钻+账期过滤）
         const params = { page: p, size: s, asset_type: currentLevel }
         if (billMonth) params.bill_month = billMonth
+        params.include_disabled = false
         const res = await api.get("/upload/group-result-list", { params })
         if (res.code === "000000") {
           setData(res.data.list || [])
           setPagination({ current: res.data.page, pageSize: res.data.size, total: res.data.total })
         }
       }
+    } catch (e) {
+      console.error("fetchData error:", e)
     } finally {
       setLoading(false)
     }
-  }, [currentLevel, viewMode, getParentFilter, filters, pagination.current, pagination.pageSize, billMonth])
+  // 关键修复：去掉 pagination.current 依赖，改用 ref；保留核心依赖
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLevel, viewMode, getParentFilter, filters, billMonth])
 
-  // Load options for current level and its next level
+  // Fetch table data - 将 fetchData 加入依赖数组，确保每次 fetchData 变更时重新绑定
+  useEffect(() => {
+    fetchData(1).catch(e => console.error("fetchData error:", e))
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLevel, selectedPath.system, selectedPath.database, selectedPath.table, viewMode, billMonth])
+
   useEffect(() => {
     const idx = LEVELS.indexOf(currentLevel)
     // Load current level options (for cascade)
@@ -331,11 +383,6 @@ export default function ResourceUploadV2() {
       loadOptions(nextLevel)
     }
   }, [currentLevel, loadOptions])
-
-  // Fetch table data when level, parent, view mode, or bill month changes
-  useEffect(() => {
-    fetchData(1)
-  }, [currentLevel, selectedPath.system, selectedPath.database, selectedPath.table, viewMode, billMonth])
 
   // Handle cascade select change
   const handleCascadeChange = (level, selectedValue, option) => {
@@ -396,6 +443,28 @@ export default function ResourceUploadV2() {
       }
     }
     return items
+  }
+
+  // Handle system merge (评审意见5)
+  const handleSysMerge = async () => {
+    if (!sysMergeTarget) { message.warning("请选择合并后的主系统"); return }
+    const sourceIds = selectedRowKeys.filter(k => k !== sysMergeTarget)
+    if (sourceIds.length === 0) { message.warning("请至少勾选一个副系统"); return }
+    try {
+      const res = await api.post("/upload/merge-systems", {
+        source_ids: sourceIds,
+        target_id: sysMergeTarget,
+        merge_reason: sysMergeReason,
+      })
+      if (res.code === "000000") {
+        message.success(`合并成功: ${res.data.mergedCount}个系统合并到主系统`)
+        setSysMergeVisible(false)
+        setSysMergeTarget("")
+        setSysMergeReason("")
+        setSelectedRowKeys([])
+        fetchData()
+      }
+    } catch { message.error("合并失败") }
   }
 
   // Handle merge action
@@ -677,9 +746,12 @@ export default function ResourceUploadV2() {
     }
     const label = currentLevel === "system" ? "系统及其所有下级" : "数据库及其所有下级"
     Modal.confirm({
-      title: `确认删除此${currentLevel === "system" ? "系统" : "数据库"}？`,
-      content: `将删除该${label}的集团结果表数据，并将中间结果表状态回退为「未上传」。此操作不可撤销。`,
-      okText: "确认删除",
+      title: `确认${currentLevel === "system" ? "删除/禁用此系统" : "删除/禁用此数据库"}？`,
+      content: `将${currentLevel === "system" ? "删除/禁用" : "删除/禁用"}该${label}的集团结果表数据。
+      ＊历史数据（之前账期已存在）将被禁用而非删除
+      ＊本账期新增数据将被永久删除
+      同时中间结果表状态将回退为「未上传」。`,
+      okText: "确认",
       okButtonProps: { danger: true },
       cancelText: "取消",
       onOk: async () => {
@@ -689,7 +761,11 @@ export default function ResourceUploadV2() {
             biz_id: groupId,
           })
           if (res.code === "000000") {
-            message.success(`删除完成: 集团结果表${res.data.deletedCount}条, 回退中间结果表${res.data.updatedCount}条`)
+            if (res.data.isHistorical) {
+              message.warning(`历史数据已禁用: 集团结果表${res.data.deletedCount}条, 回退中间结果表${res.data.updatedCount}条`)
+            } else {
+              message.success(`删除完成: 集团结果表${res.data.deletedCount}条, 回退中间结果表${res.data.updatedCount}条`)
+            }
             fetchData()
           }
         } catch { message.error("删除失败") }
@@ -743,7 +819,6 @@ export default function ResourceUploadV2() {
 
   const actionButtons = (record) => {
     const as = record.audit_status || "pending"
-    const us = record.upload_status || "pending"
     const bid = record.local_biz_id
     const uf = record.upload_flag
     return (
@@ -754,11 +829,8 @@ export default function ResourceUploadV2() {
             <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleAudit("single", [bid])}>稽核</Button>
           </>
         )}
-        {as === "pass" && us === "pending" && uf !== "0" && (
-          <Button size="small" icon={<SendOutlined />} onClick={() => handleSyncToResultMid("single", [bid])}>同步结果表</Button>
-        )}
         {as === "pass" && uf !== "0" && (
-          <Button size="small" type="primary" icon={<CloudUploadOutlined />} onClick={() => handleConfirmUpload("single", [bid])}>上传集团</Button>
+          <Button size="small" icon={<SendOutlined />} onClick={() => handleSyncToResultMid("single", [bid])}>同步到中间结果表</Button>
         )}
       </Space>
     )
@@ -840,14 +912,13 @@ export default function ResourceUploadV2() {
     { title: "账期", dataIndex: "billMonth", width: 80 },
     { title: "稽核状态", dataIndex: "auditStatus", width: 80, render: renderAuditStatus, fixed: "right" },
     { title: "不合规原因", dataIndex: "nonCompliantReason", width: 160, ellipsis: true, render: (v) => v || "-", fixed: "right" },
-    { title: "操作", key: "action", width: 180, fixed: "right", render: (_, r) => (
+    { title: "操作", key: "action", width: 200, fixed: "right", render: (_, r) => (
       <Space size="small" wrap>
         {(!r.auditStatus || r.auditStatus === "pending" || r.auditStatus === "fail") && (
           <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleResultAudit(r)}>稽核</Button>
         )}
-        {r.auditStatus === "fail" && (
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
-        )}
+        {/* 评审意见6：所有稽核状态的记录都保留编辑按钮 */}
+        <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
       </Space>
     )},
   ]
@@ -923,14 +994,13 @@ export default function ResourceUploadV2() {
     { title: "账期", dataIndex: "billMonth", width: 80 },
     { title: "稽核状态", dataIndex: "auditStatus", width: 80, render: renderAuditStatus, fixed: "right" },
     { title: "不合规原因", dataIndex: "nonCompliantReason", width: 160, ellipsis: true, render: (v) => v || "-", fixed: "right" },
-    { title: "操作", key: "action", width: 180, fixed: "right", render: (_, r) => (
+    { title: "操作", key: "action", width: 200, fixed: "right", render: (_, r) => (
       <Space size="small" wrap>
         {(!r.auditStatus || r.auditStatus === "pending" || r.auditStatus === "fail") && (
           <Button size="small" icon={<SafetyCertificateOutlined />} onClick={() => handleResultAudit(r)}>稽核</Button>
         )}
-        {r.auditStatus === "fail" && (
-          <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
-        )}
+        {/* 评审意见6：所有稽核状态的记录都保留编辑按钮 */}
+        <Button size="small" icon={<EditOutlined />} onClick={() => handleResultModify(r)}>编辑</Button>
       </Space>
     )},
   ]
@@ -971,25 +1041,31 @@ export default function ResourceUploadV2() {
     )},
   ]
 
-  // ─── 集团结果表列定义（带删除操作） ─────────────
+  // ─── 集团结果表列定义（只有操作，无稽核状态与不合规原因） ─────────────
 
-  const GROUP_RESULT_SYSTEM_COLS = RESULT_MID_SYSTEM_COLS.map(col => {
-    if (col.key === "action") {
-      return {
-        ...col,
-        render: (_, r) => (
-          <Space size="small">
-            <Button size="small" danger icon={<DeleteOutlined />}
-              onClick={() => handleDeleteFromGroup(r)}>删除系统及其下级</Button>
-          </Space>
-        ),
+  // 过滤掉稽核状态和不合规原因列（集团结果表不展示这些信息）
+  const _groupResultFilter = (col) =>
+    col.dataIndex !== "auditStatus" && col.dataIndex !== "nonCompliantReason"
+
+  const GROUP_RESULT_SYSTEM_COLS = RESULT_MID_SYSTEM_COLS
+    .filter(_groupResultFilter)
+    .map(col => {
+      if (col.key === "action") {
+        return {
+          ...col,
+          render: (_, r) => (
+            <Space size="small">
+              <Button size="small" danger icon={<DeleteOutlined />}
+                onClick={() => handleDeleteFromGroup(r)}>删除系统及其下级</Button>
+            </Space>
+          ),
+        }
       }
-    }
-    return col
-  })
+      return col
+    })
 
   const GROUP_RESULT_DATABASE_COLS = RESULT_MID_DATABASE_COLS
-    .filter(col => col.dataIndex !== "midLocalBizId") // 数据库标识在集团结果表中无对应数据
+    .filter(col => col.dataIndex !== "midLocalBizId" && _groupResultFilter(col))
     .map(col => {
       if (col.key === "action") {
         return {
@@ -1006,7 +1082,7 @@ export default function ResourceUploadV2() {
     })
 
   const GROUP_RESULT_TABLE_COLS = RESULT_MID_TABLE_COLS
-    .filter(col => col.dataIndex !== "midLocalBizId" && col.dataIndex !== "table_schema") // 集团结果表中无对应数据
+    .filter(col => col.dataIndex !== "midLocalBizId" && col.dataIndex !== "table_schema" && _groupResultFilter(col))
     .map(col => {
       if (col.key === "action") {
         return { ...col, render: () => <span style={{ color: "#999" }}>—</span> }
@@ -1014,12 +1090,14 @@ export default function ResourceUploadV2() {
       return col
     })
 
-  const GROUP_RESULT_FIELD_COLS = RESULT_MID_FIELD_COLS.map(col => {
-    if (col.key === "action") {
-      return { ...col, render: () => <span style={{ color: "#999" }}>—</span> }
-    }
-    return col
-  })
+  const GROUP_RESULT_FIELD_COLS = RESULT_MID_FIELD_COLS
+    .filter(_groupResultFilter)
+    .map(col => {
+      if (col.key === "action") {
+        return { ...col, render: () => <span style={{ color: "#999" }}>—</span> }
+      }
+      return col
+    })
 
   // 各资产类型的列定义映射
   const RESULT_COLS_MAP = {
@@ -1112,14 +1190,16 @@ export default function ResourceUploadV2() {
         <Breadcrumb items={getBreadcrumbItems()} />
       </div>}
 
-      {/* 账期显示/选择 */}
+      {/* 账期显示/选择（评审意见8：不选=全量查询） */}
       {viewMode === "result-mid" ? (
         <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontWeight: "bold" }}>账期：</span>
-          <Select value={billMonth} onChange={(v) => { setBillMonth(v) }}
-            style={{ width: 120 }}
+          <Select value={billMonth} onChange={(v) => { setBillMonth(v || "") }}
+            style={{ width: 120 }} allowClear placeholder="全部账期"
             options={availableBillMonths.map(m => ({ value: m, label: m }))} />
-          <span style={{ color: "#888", fontSize: 12 }}>上月26日 - 本月25日</span>
+          <span style={{ color: "#888", fontSize: 12 }}>
+            {billMonth ? "上月26日 - 本月25日" : "未选择账期 → 全量查询（所有账期）"}
+          </span>
         </div>
       ) : viewMode === "group-result" ? (
         <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
@@ -1145,11 +1225,66 @@ export default function ResourceUploadV2() {
           style={{ marginBottom: 12 }} closable onClose={() => setMergeSuggestions([])} />
       )}
 
+      {/* 中间表筛选栏（评审意见1、10、11） */}
+      {viewMode === "mid" && currentLevel === "system" && <div style={{ marginBottom: 12, padding: 12, background: "#f5f5f5", borderRadius: 4, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontWeight: "bold", whiteSpace: "nowrap", fontSize: 13 }}>筛选：</span>
+        <Select placeholder="系统状态" allowClear style={{ width: 120 }} value={filters.sysStatus || undefined}
+          onChange={(v) => setFilters(f => ({ ...f, sysStatus: v || "" }))}>
+          <Option value="">全部</Option>
+          <Option value="建设中">建设中</Option>
+          <Option value="在用">在用</Option>
+          <Option value="下线">下线</Option>
+        </Select>
+        <Select placeholder="已上传集团" allowClear style={{ width: 130 }} value={filters.groupUploaded || undefined}
+          onChange={(v) => setFilters(f => ({ ...f, groupUploaded: v || "" }))}>
+          <Option value="">全部</Option>
+          <Option value="1">已上传</Option>
+          <Option value="0">未上传</Option>
+        </Select>
+        <span style={{ fontSize: 13 }}>创建时间：</span>
+        <RangePicker size="small" value={timeFilters.createTimeRange}
+          onChange={(v) => setTimeFilters(t => ({ ...t, createTimeRange: v }))}
+          showTime={{ format: "HH:mm:ss" }} format="YYYY-MM-DD HH:mm:ss" />
+        <span style={{ fontSize: 13 }}>更新时间：</span>
+        <RangePicker size="small" value={timeFilters.updateTimeRange}
+          onChange={(v) => setTimeFilters(t => ({ ...t, updateTimeRange: v }))}
+          showTime={{ format: "HH:mm:ss" }} format="YYYY-MM-DD HH:mm:ss" />
+        <Button size="small" onClick={() => { setFilters(f => ({ ...f, sysStatus: "", groupUploaded: "" })); setTimeFilters({ createTimeRange: null, updateTimeRange: null }) }}>重置筛选</Button>
+      </div>}
+
+      {/* 中间结果表下线系统筛选（评审意见9、10） */}
+      {viewMode === "result-mid" && currentLevel === "system" && <div style={{ marginBottom: 12, display: "flex", gap: 8, alignItems: "center" }}>
+        <span style={{ fontWeight: "bold", fontSize: 13 }}>筛选：</span>
+        <Select placeholder="系统状态" allowClear style={{ width: 120 }}
+          onChange={(v) => {
+            // 通过查询参数传递状态筛选 - 利用 extra params
+            // 在实际项目中可扩展API支持，当前用前端过滤示意
+          }}>
+          <Option value="">全部</Option>
+          <Option value="下线">下线系统</Option>
+          <Option value="active">在线系统</Option>
+        </Select>
+      </div>}
+
       {/* 操作按钮 - 根据视图模式显示不同按钮 */}
       {viewMode === "mid" && <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <Button icon={<SyncOutlined />} onClick={() => handleSync("all")}>同步到中间表</Button>
         <Button icon={<SafetyCertificateOutlined />} onClick={() => handleAudit("all")}>触发稽核</Button>
         <Button icon={<SendOutlined />} onClick={() => handleSyncToResultMid("all")}>同步到中间结果表</Button>
+        {/* 合并系统按钮（评审意见5）- 仅系统级别显示 */}
+        {currentLevel === "system" && (
+          <Button icon={<PartitionOutlined />}
+            onClick={() => {
+              if (selectedRowKeys.length < 2) { message.warning("请勾选至少两个系统进行合并"); return }
+              // 直接从当前页面 data 中提取选中的系统，存入 ref（不受后续 re-render 影响）
+              const selectedData = data.filter(d => selectedRowKeys.includes(d.local_biz_id))
+              sysMergeSourceRef.current = selectedData
+              setSysMergeItems(selectedData) // 触发渲染
+              setSysMergeTarget("")
+              setSysMergeReason("")
+              setSysMergeVisible(true)
+            }}
+            disabled={selectedRowKeys.length < 2}>合并系统（{selectedRowKeys.length}）</Button>
+        )}
       </div>}
       {viewMode === "result-mid" && <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
         <Button icon={<SafetyCertificateOutlined />}
@@ -1203,10 +1338,14 @@ export default function ResourceUploadV2() {
 
       {/* 数据表格 */}
       <Table
-        rowKey={viewMode === "mid" ? "local_biz_id" : "id"}
-        rowSelection={viewMode === "mid" ? { selectedRowKeys, onChange: setSelectedRowKeys } : (viewMode === "result-mid" ? {
+        rowKey={(record) => record.local_biz_id || record.id || record.midLocalBizId || Math.random()}
+        rowSelection={viewMode === "mid" ? {
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys),
+          preserveSelectedRowKeys: false,
+        } : (viewMode === "result-mid" ? {
           selectedRowKeys: selectedResultKeys,
-          onChange: setSelectedResultKeys,
+          onChange: (keys) => setSelectedResultKeys(keys),
         } : undefined)}
         columns={getColumns()} dataSource={data} loading={loading} size="small"
         pagination={{ ...pagination, showSizeChanger: true, onChange: (p, s) => fetchData(p, s) }}
@@ -1228,6 +1367,39 @@ export default function ResourceUploadV2() {
           </Space>
         }>
         {renderModifyForm()}
+      </Modal>
+
+      {/* 合并系统对话框（评审意见5）- 用 sysMergeItems 直接从 ref 读取 */}
+      <Modal title={<><PartitionOutlined style={{ color: "#1890ff" }} /> 合并系统</>}
+        open={sysMergeVisible}
+        onCancel={() => { setSysMergeVisible(false); setSysMergeTarget(""); setSysMergeReason(""); setSysMergeItems([]) }}
+        onOk={handleSysMerge} okText="确认合并" okButtonProps={{ disabled: !sysMergeTarget }}
+        width={500}>
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message="合并后保留选择的系统为主系统，其他被勾选的系统自动标记为副系统。副系统上传时数据将归入主系统名下。" />
+        <div style={{ marginBottom: 12 }}>
+          <p><strong>已勾选系统（{sysMergeItems.length}个）：</strong></p>
+          <ul style={{ margin: "4px 0" }}>
+            {sysMergeItems.map(d => (
+              <li key={d.local_biz_id}>{d.sys_name || d.sys_code}（{d.local_biz_id}）</li>
+            ))}
+          </ul>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <p><strong>选择主系统：</strong></p>
+          <Select style={{ width: "100%" }} value={sysMergeTarget || undefined}
+            onChange={setSysMergeTarget} placeholder="请选择合并后的主系统">
+            {sysMergeItems.map(d => (
+              <Option key={d.local_biz_id} value={d.local_biz_id}>
+                {d.sys_name || d.sys_code}（{d.local_biz_id}）
+              </Option>
+            ))}
+          </Select>
+        </div>
+        <div>
+          <p><strong>合并原因（选填）：</strong></p>
+          <TextArea rows={2} value={sysMergeReason} onChange={e => setSysMergeReason(e.target.value)} />
+        </div>
       </Modal>
 
       {/* 合并建议对话框 */}

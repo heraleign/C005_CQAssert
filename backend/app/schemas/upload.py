@@ -64,6 +64,13 @@ class DeleteGroupResultRequest(BaseModel):
     biz_id: str
 
 
+class MergeSystemsRequest(BaseModel):
+    """合并系统请求（评审意见5）"""
+    source_ids: List[str]
+    target_id: str
+    merge_reason: str = ""
+
+
 class UploadToGroupRequest(BaseModel):
     asset_type: str
     scope_type: str = "system"

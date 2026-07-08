@@ -148,6 +148,9 @@ class UploadEngine:
                 if sync_type == "incremental":
                     update_data["oper_type"] = OPER_TYPE_NEW
                     update_data["oper_time"] = datetime.now().strftime("%Y%m%d%H%M%S")
+                now_dt = datetime.now()
+                update_data["create_time"] = now_dt
+                update_data["update_time"] = now_dt
                 obj = mid_model(local_biz_id=local_biz_id, **update_data)
                 self.db.add(obj)
             else:
@@ -156,6 +159,7 @@ class UploadEngine:
                 if sync_type == "incremental":
                     existing.oper_type = OPER_TYPE_MODIFY
                 existing.last_sync_time = datetime.now()
+                existing.update_time = datetime.now()
 
             sync_count += 1
 
@@ -575,7 +579,10 @@ class UploadEngine:
         scope_ids: Optional[List[str]] = None,
         bill_month: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """将合规记录同步到中间结果表（带账期）"""
+        """将合规记录同步到中间结果表（带账期）
+        - 副系统 → 自动替换为主系统（评审意见5）
+        - 下线系统 → oper_type=2，跳过稽核（评审意见9）
+        """
         if asset_type not in LOCAL_MODEL_MAP:
             return {"syncCount": 0, "skippedCount": 0, "mergeSuggestions": []}
 
@@ -609,27 +616,63 @@ class UploadEngine:
                 if val is not None:
                     snapshot[col.name] = str(val)
 
-            # UPSERT到中间结果表
+            # 处理操作类型
+            oper_type = rec.oper_type or OPER_TYPE_NEW
+
+            # 处理下线系统（评审意见9）：状态下线 → oper_type=2
+            if asset_type == "system" and getattr(rec, "status", "") == "下线":
+                oper_type = OPER_TYPE_DELETE
+
+            # 处理副系统（评审意见5）：如果系统是副系统，需要替换为对应的主系统ID
+            resolved_local_biz_id = rec.local_biz_id
+            if asset_type == "system":
+                if hasattr(rec, "is_primary") and getattr(rec, "is_primary", 1) == 0:
+                    primary_id = getattr(rec, "primary_system_id", None)
+                    if primary_id:
+                        primary_sys = self.db.query(UploadMidSystem).filter(
+                            UploadMidSystem.local_biz_id == primary_id
+                        ).first()
+                        if primary_sys:
+                            resolved_local_biz_id = primary_id
+                            # 更新快照中的local_biz_id为对应主系统的，便于关联
+                            snapshot["local_biz_id"] = primary_id
+                            snapshot["primary_system_id"] = primary_id
+                            snapshot["is_primary"] = 0
+
+            # UPSERT到中间结果表（使用解析后的local_biz_id）
             existing = self.db.query(UploadResultMid).filter(
                 UploadResultMid.asset_type == asset_type,
-                UploadResultMid.mid_local_biz_id == rec.local_biz_id,
+                UploadResultMid.mid_local_biz_id == resolved_local_biz_id,
                 UploadResultMid.bill_month == bill_month,
             ).first()
+
+            # 判断是否在之前账期已存在（评审意见7）
+            if asset_type == "system" and not existing:
+                prev_exists = self.db.query(UploadResultMid).filter(
+                    UploadResultMid.asset_type == asset_type,
+                    UploadResultMid.mid_local_biz_id == resolved_local_biz_id,
+                    UploadResultMid.bill_month < bill_month,
+                ).first()
+                if prev_exists:
+                    oper_type = OPER_TYPE_MODIFY
 
             if existing:
                 existing.data_snapshot = json.dumps(snapshot, ensure_ascii=False)
                 existing.sync_time = datetime.now()
                 existing.audit_status = rec.audit_status
+                existing.oper_type = oper_type
+                existing.oper_time = datetime.now().strftime("%Y%m%d%H%M%S")
             else:
                 obj = UploadResultMid(
                     asset_type=asset_type,
-                    mid_local_biz_id=rec.local_biz_id,
+                    mid_local_biz_id=resolved_local_biz_id,
                     group_unique_id=rec.group_unique_id,
                     bill_month=bill_month,
                     data_snapshot=json.dumps(snapshot, ensure_ascii=False),
                     sync_time=datetime.now(),
                     audit_status=rec.audit_status,
-                    oper_type=rec.oper_type or OPER_TYPE_NEW,
+                    oper_type=oper_type,
+                    oper_time=datetime.now().strftime("%Y%m%d%H%M%S"),
                 )
                 self.db.add(obj)
 
@@ -663,7 +706,9 @@ class UploadEngine:
         cascade: bool = False,
     ) -> Dict[str, Any]:
         """从中间结果表确认上传到集团结果表（全量无账期）
-        cascade=True 时，上传系统级联上传其下所有库/表/字段
+        - 下线系统 → record_status=disabled（评审意见9）
+        - 历史账期修改后上传 → oper_type=修改（评审意见7）
+        - 上传成功后标记 group_uploaded（评审意见11）
         """
         bill_month = bill_month or self._calc_bill_month()
 
@@ -726,12 +771,21 @@ class UploadEngine:
                 UploadGroupResult.group_unique_id == rec.group_unique_id,
             ).first()
 
+            # 判断操作类型：如果是下线系统则标记删除
+            is_offline = rec.oper_type == OPER_TYPE_DELETE
+
             if existing:
                 existing.data_snapshot = rec.data_snapshot
                 existing.sync_time = now
-                existing.oper_type = OPER_TYPE_MODIFY
+                # 历史数据修改后上传 → 标记为修改（评审意见7）
+                existing.oper_type = OPER_TYPE_MODIFY if not is_offline else OPER_TYPE_DELETE
                 existing.oper_time = now.strftime("%Y%m%d%H%M%S")
                 existing.bill_month = rec.bill_month
+                # 下线系统禁用记录（评审意见9）
+                if is_offline:
+                    existing.record_status = "disabled"
+                else:
+                    existing.record_status = "active"
             else:
                 obj = UploadGroupResult(
                     asset_type=rec.asset_type,
@@ -739,14 +793,24 @@ class UploadEngine:
                     bill_month=rec.bill_month,
                     data_snapshot=rec.data_snapshot,
                     sync_time=now,
-                    oper_type=OPER_TYPE_NEW,
+                    oper_type=rec.oper_type or OPER_TYPE_NEW,
                     oper_time=now.strftime("%Y%m%d%H%M%S"),
+                    record_status="disabled" if is_offline else "active",
                 )
                 self.db.add(obj)
 
             rec.result_status = "uploaded"
             rec.upload_time = now
             success += 1
+
+            # 标记系统中间表的 group_uploaded（评审意见11）
+            if asset_type == "system":
+                sys_mid = self.db.query(UploadMidSystem).filter(
+                    UploadMidSystem.local_biz_id == rec.mid_local_biz_id
+                ).first()
+                if sys_mid:
+                    sys_mid.group_uploaded = 1
+                    sys_mid.update_time = now
 
         self.db.commit()
         asset_desc = f"{asset_type}+下级" if cascade else asset_type
@@ -756,21 +820,20 @@ class UploadEngine:
 
         return {"successCount": success, "skippedCount": skipped, "billMonth": bill_month}
 
-    # ─── 8. 从集团结果表删除 ─────────────────────
+    # ─── 8. 从集团结果表删除/禁用 (评审意见4) ─────
 
     def delete_from_group_result(
         self,
         asset_type: str,
         biz_id: str,
     ) -> Dict[str, Any]:
-        """删除集团结果表记录，回退中间结果表状态
-        asset_type: system 或 database
-        biz_id: 对应的 local_biz_id（从级联筛选获得），也支持传入 group_unique_id
+        """删除/禁用集团结果表记录，回退中间结果表状态
+        - 历史数据（之前账期已存在）：仅禁用（record_status=disabled），不可硬删除
+        - 本账期新增数据：可硬删除
         """
         # 如果传入的是 group_unique_id，先解析为 local_biz_id
         resolved_biz_id = biz_id
         if biz_id.startswith("JT-SYS-"):
-            # 查找对应系统的 local_biz_id
             sys_rec = self.db.query(UploadMidSystem.local_biz_id).filter(
                 UploadMidSystem.group_unique_id == biz_id).first()
             if sys_rec:
@@ -779,7 +842,6 @@ class UploadEngine:
             else:
                 return {"deletedCount": 0, "updatedCount": 0, "reason": "未找到对应系统记录"}
         elif biz_id.count("-") >= 2 and not biz_id.startswith("CQ-"):
-            # 可能是 database 的 group_unique_id
             db_rec = self.db.query(UploadMidDatabase.local_biz_id).filter(
                 UploadMidDatabase.group_unique_id == biz_id).first()
             if db_rec:
@@ -831,22 +893,46 @@ class UploadEngine:
         if not group_ids:
             return {"deletedCount": 0, "updatedCount": 0, "reason": "未找到对应记录"}
 
-        # 删除 UploadGroupResult 记录
-        deleted = self.db.query(UploadGroupResult).filter(
-            UploadGroupResult.group_unique_id.in_(group_ids)).delete(synchronize_session=False)
-
-        # 更新 UploadResultMid 状态（已上传→未上传）
-        updated = self.db.query(UploadResultMid).filter(
+        # 判断是否有历史数据（之前账期已存在）
+        current_bill = self._calc_bill_month()
+        has_history = self.db.query(UploadResultMid).filter(
             UploadResultMid.group_unique_id.in_(group_ids),
-            UploadResultMid.result_status == "uploaded",
-        ).update({"result_status": "pending"}, synchronize_session=False)
+            UploadResultMid.bill_month < current_bill,
+        ).first() is not None
 
-        self.db.commit()
-        self._log_operation("DELETE_FROM_GROUP", asset_type, "single", biz_id,
-                            "SUCCESS",
-                            f"删除{deleted}条集团结果表，回退{updated}条中间结果表状态")
+        if has_history:
+            # 历史数据：仅禁用，不可硬删除
+            disabled = self.db.query(UploadGroupResult).filter(
+                UploadGroupResult.group_unique_id.in_(group_ids),
+            ).update({"record_status": "disabled"}, synchronize_session=False)
 
-        return {"deletedCount": deleted, "updatedCount": updated}
+            # 更新 UploadResultMid 状态
+            updated = self.db.query(UploadResultMid).filter(
+                UploadResultMid.group_unique_id.in_(group_ids),
+                UploadResultMid.result_status == "uploaded",
+            ).update({"result_status": "pending"}, synchronize_session=False)
+
+            self.db.commit()
+            self._log_operation("DISABLE_FROM_GROUP", asset_type, "single", biz_id,
+                                "SUCCESS",
+                                f"禁用{disabled}条（历史数据），回退{updated}条中间结果表状态")
+            return {"deletedCount": disabled, "updatedCount": updated, "isHistorical": True,
+                    "message": "历史数据不可删除，已禁用"}
+        else:
+            # 本账期新增：可硬删除
+            deleted = self.db.query(UploadGroupResult).filter(
+                UploadGroupResult.group_unique_id.in_(group_ids)).delete(synchronize_session=False)
+
+            updated = self.db.query(UploadResultMid).filter(
+                UploadResultMid.group_unique_id.in_(group_ids),
+                UploadResultMid.result_status == "uploaded",
+            ).update({"result_status": "pending"}, synchronize_session=False)
+
+            self.db.commit()
+            self._log_operation("DELETE_FROM_GROUP", asset_type, "single", biz_id,
+                                "SUCCESS",
+                                f"删除{deleted}条（本账期新增），回退{updated}条中间结果表状态")
+            return {"deletedCount": deleted, "updatedCount": updated, "isHistorical": False}
 
     # ─── 9. 标记是否上传 ─────────────────────────
 
@@ -990,6 +1076,78 @@ class UploadEngine:
                             "SUCCESS", f"合并{len(source_ids)}条记录到{target_id}")
 
         return {"merged": True, "mergeLogId": log_id, "mergeDetail": merge_detail}
+
+    # ─── 新增：合并系统（主/副系统打标）(评审意见5) ───
+
+    def merge_systems(
+        self,
+        source_ids: List[str],
+        target_id: str,
+        merge_reason: str = "",
+    ) -> Dict[str, Any]:
+        """合并系统：用户选择多个系统，指定一个为主系统，其余为副系统"""
+        # 验证目标系统存在
+        target = self.db.query(UploadMidSystem).filter(
+            UploadMidSystem.local_biz_id == target_id
+        ).first()
+        if not target:
+            return {"merged": False, "reason": "目标主系统不存在"}
+
+        # 确保目标系统是主系统，清除其副系统关联字段
+        target.is_primary = 1
+        target.primary_system_id = None
+        target.primary_sys_name = None
+        target.primary_sys_code = None
+
+        merged_count = 0
+        merge_detail = {
+            "primary": {"id": target_id, "name": target.sys_name or "", "code": target.sys_code or ""},
+            "secondary": [],
+        }
+
+        for src_id in source_ids:
+            if src_id == target_id:
+                continue
+            source = self.db.query(UploadMidSystem).filter(
+                UploadMidSystem.local_biz_id == src_id
+            ).first()
+            if not source:
+                continue
+
+            # 副系统打标，记录主系统的名称和编码
+            source.is_primary = 0
+            source.primary_system_id = target_id
+            source.primary_sys_name = target.sys_name or ""
+            source.primary_sys_code = target.sys_code or ""
+            merged_count += 1
+            merge_detail["secondary"].append({
+                "id": src_id,
+                "name": source.sys_name or "",
+                "code": source.sys_code or "",
+            })
+
+        # 构建人类可读的描述
+        primary_desc = f"{merge_detail['primary']['name']}({merge_detail['primary']['code']})" if merge_detail['primary']['name'] else target_id
+        secondary_names = [s['name'] or s['id'] for s in merge_detail['secondary']]
+        detail_summary = f"主系统: {primary_desc}; 副系统({len(secondary_names)}个): {'; '.join(secondary_names)}"
+
+        # 记录合并日志
+        log = MergeLog(
+            asset_type="system",
+            target_local_biz_id=target_id,
+            source_local_biz_ids=json.dumps(source_ids),
+            merge_reason=merge_reason or detail_summary,
+            merge_detail=json.dumps(merge_detail, ensure_ascii=False),
+            operator=self.operator,
+        )
+        self.db.add(log)
+        self.db.flush()
+
+        self.db.commit()
+        self._log_operation("MERGE_SYSTEMS", "system", "multi", target_id,
+                            "SUCCESS", f"合并{merged_count}个系统到{target.sys_name}")
+
+        return {"merged": True, "mergedCount": merged_count, "mergeLogId": log.id, "detail": merge_detail}
 
     # ─── 10. 工具方法 ────────────────────────────
 
@@ -1232,11 +1390,16 @@ class UploadEngine:
         asset_type: Optional[str] = None,
         group_unique_id: Optional[str] = None,
         bill_month: Optional[str] = None,
+        include_disabled: bool = False,
         page: int = 1,
         size: int = 10,
     ) -> Dict[str, Any]:
-        """查询集团结果表数据（只读，支持账期过滤）"""
+        """查询集团结果表数据（只读，支持账期过滤）
+        默认只显示 active 记录（评审意见4）
+        """
         query = self.db.query(UploadGroupResult)
+        if not include_disabled:
+            query = query.filter(UploadGroupResult.record_status == "active")
         if asset_type:
             query = query.filter(UploadGroupResult.asset_type == asset_type)
         if group_unique_id:
@@ -1478,13 +1641,32 @@ class UploadEngine:
             parent_id = filters.pop("parent_local_biz_id", None)
             parent_level = filters.pop("parent_level", None)
             query = self._apply_parent_filter(query, mid_model, asset_type, parent_id, parent_level)
+
+            # 处理时间范围过滤（评审意见1）
+            create_time_start = filters.pop("create_time_start", None)
+            create_time_end = filters.pop("create_time_end", None)
+            update_time_start = filters.pop("update_time_start", None)
+            update_time_end = filters.pop("update_time_end", None)
+            if create_time_start and hasattr(mid_model, "create_time"):
+                query = query.filter(mid_model.create_time >= create_time_start)
+            if create_time_end and hasattr(mid_model, "create_time"):
+                query = query.filter(mid_model.create_time <= create_time_end)
+            if update_time_start and hasattr(mid_model, "update_time"):
+                query = query.filter(mid_model.update_time >= update_time_start)
+            if update_time_end and hasattr(mid_model, "update_time"):
+                query = query.filter(mid_model.update_time <= update_time_end)
+
+            # 处理精确匹配字段（非模糊搜索）
+            exact_fields = ["local_biz_id", "group_uploaded", "is_primary", "merge_flag"]
+            for field in exact_fields:
+                val = filters.pop(field, None)
+                if val is not None and val != "" and hasattr(mid_model, field):
+                    query = query.filter(getattr(mid_model, field) == val)
+
             # 再处理普通文本过滤
             for field, val in filters.items():
                 if val and hasattr(mid_model, field):
-                    if field == "local_biz_id":
-                        query = query.filter(getattr(mid_model, field) == val)
-                    else:
-                        query = query.filter(getattr(mid_model, field).like(f"%{val}%"))
+                    query = query.filter(getattr(mid_model, field).like(f"%{val}%"))
 
         total = query.count()
         items = query.offset((page - 1) * size).limit(size).all()
@@ -1498,6 +1680,16 @@ class UploadEngine:
             d = {"localBizId": item.local_biz_id}
             for col in mid_model.__table__.columns:
                 d[col.name] = getattr(item, col.name)
+
+            # 为系统级别添加主系统名称（评审意见5）
+            if asset_type == "system":
+                d["primary_sys_name"] = ""
+                if hasattr(item, "primary_system_id") and item.primary_system_id:
+                    primary_sys = self.db.query(UploadMidSystem.sys_name).filter(
+                        UploadMidSystem.local_biz_id == item.primary_system_id
+                    ).first()
+                    if primary_sys:
+                        d["primary_sys_name"] = primary_sys[0]
 
             # 为子级列表添加父级名称
             if asset_type == "database":
