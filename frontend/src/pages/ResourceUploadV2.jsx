@@ -522,6 +522,21 @@ export default function ResourceUploadV2() {
     } catch { message.error("操作失败") }
   }
 
+  // 上传标记开关切换（直接切换不上传/上传，不需要弹窗）
+  const handleUploadFlagToggle = async (record, checked) => {
+    // checked=true → Switch 显示"上传" ← 当前是上传状态，点击变成不上传
+    // checked=false → Switch 显示"不上传" ← 当前是不上传状态，点击变成上传
+    try {
+      await api.post("/upload/mark-exclude", {
+        asset_type: currentLevel,
+        asset_id: record.local_biz_id,
+        exclude_flag: !checked,
+        reason: "",
+      })
+      fetchData()
+    } catch { message.error("操作失败") }
+  }
+
   // Row drill-down
   const handleRowClick = (record) => {
     const idx = LEVELS.indexOf(currentLevel)
@@ -1122,8 +1137,8 @@ export default function ResourceUploadV2() {
     if (viewMode === "result-mid") {
       return RESULT_COLS_MAP[currentLevel] || []
     }
-    // mid table
-    return [
+    // mid table - 替换上传标记列的 render 以使用组件内 fetch/handler
+    const midColumns = [
       ...(TYPE_COLUMNS[currentLevel] || []),
       { title: "稽核状态", dataIndex: "audit_status", width: 90, render: renderAuditStatus },
       { title: "不合规原因", dataIndex: "non_compliant_reason", width: 200, ellipsis: true,
@@ -1131,6 +1146,17 @@ export default function ResourceUploadV2() {
       { title: "上传状态", dataIndex: "upload_status", width: 90, render: renderUploadStatus },
       { title: "操作", key: "action", width: 260, fixed: "right", render: (_, r) => actionButtons(r) },
     ]
+    // TYPE_COLUMNS 是模块级常量，Switch onChange 拿不到组件内的 handleUploadFlagToggle
+    if (currentLevel === "database" || currentLevel === "table") {
+      const flagCol = midColumns.find(c => c.dataIndex === "upload_flag")
+      if (flagCol) {
+        flagCol.render = (v, r) => (
+          <Switch checked={v !== "0"} checkedChildren="上传" unCheckedChildren="不上传" size="small"
+            onChange={(checked) => handleUploadFlagToggle(r, checked)} />
+        )
+      }
+    }
+    return midColumns
   }
 
   return (

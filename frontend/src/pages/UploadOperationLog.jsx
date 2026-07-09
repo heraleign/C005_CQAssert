@@ -33,11 +33,12 @@ export default function UploadOperationLog() {
   }
 
   const columns = [
-    { title: '批次号', dataIndex: 'batchNo', width: 200 },
+    { title: '账期', dataIndex: 'billMonth', width: 80,
+      render: (v) => v || '-' },
     { title: '上传时间', dataIndex: 'uploadTime', width: 160 },
     { title: '操作人', dataIndex: 'operator', width: 100 },
     { title: '资产类型', dataIndex: 'assetType', width: 100 },
-    { title: '上传范围', dataIndex: 'scopeDesc', width: 200 },
+    { title: '上传范围', dataIndex: 'scopeDesc', width: 280, ellipsis: true },
     { title: '成功条数', dataIndex: 'successCount', width: 90 },
     { title: '失败条数', dataIndex: 'failCount', width: 90 },
     { title: '状态', dataIndex: 'uploadStatus', width: 100, render: renderStatus },
@@ -58,7 +59,7 @@ export default function UploadOperationLog() {
           onChange={(e) => setFilters({ ...filters, operator: e.target.value })} allowClear />
         <Button icon={<SearchOutlined />} onClick={() => fetchData(1)}>查询</Button>
       </div>
-      <Table rowKey="batchNo" columns={columns} dataSource={data} loading={loading} size="small"
+      <Table rowKey={(r) => r.billMonth + r.uploadTime + r.operator} columns={columns} dataSource={data} loading={loading} size="small"
         pagination={{ ...pagination, showSizeChanger: true, onChange: (p, s) => fetchData(p, s) }}
         scroll={{ x: 1100 }} />
     </div>

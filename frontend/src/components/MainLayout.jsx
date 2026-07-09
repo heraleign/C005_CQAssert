@@ -22,11 +22,11 @@ const menuItems = [
   { key: '/upload', icon: <CloudUploadOutlined />, label: '集团上报',
     children: [
       { key: '/upload', label: '资产类/多模态上报' },
-      { key: '/upload/resource', label: '资源类集团上报' },
+      // { key: '/upload/resource', label: '资源类集团上报' },
       { key: '/upload/resource-v2', label: '资源类集团上报（优化）' },
       { key: '/upload/modify-log', label: '修改记录查询' },
       { key: '/upload/upload-log', label: '上传记录查询' },
-      { key: '/upload/result-view', label: '上传结果查看（只读）' },
+      // { key: '/upload/result-view', label: '上传结果查看（只读）' },
       { key: '/upload/exclude-marks', label: '排除上传标记' },
       { key: '/upload/merge-logs', label: '合并日志查询' },
     ],

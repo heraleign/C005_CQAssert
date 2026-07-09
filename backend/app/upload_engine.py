@@ -816,7 +816,7 @@ class UploadEngine:
         asset_desc = f"{asset_type}+下级" if cascade else asset_type
         self._log_operation("CONFIRM_UPLOAD", asset_desc, scope_type,
                             scope_ids[0] if scope_ids else None, "SUCCESS",
-                            f"上传{success}条到集团结果表，跳过{skipped}条")
+                            f"账期{bill_month}:上传{success}条到集团结果表，跳过{skipped}条")
 
         return {"successCount": success, "skippedCount": skipped, "billMonth": bill_month}
 
@@ -1807,9 +1807,9 @@ class UploadEngine:
         page: int = 1,
         size: int = 10,
     ) -> Dict[str, Any]:
-        """查询上传日志"""
+        """查询上传日志 - 只记录上传集团操作，不记录上传中间结果表"""
         query = self.db.query(UploadOperationLog).filter(
-            UploadOperationLog.operation_type == "UPLOAD"
+            UploadOperationLog.operation_type.in_(["UPLOAD", "CONFIRM_UPLOAD"])
         )
         if asset_type:
             query = query.filter(UploadOperationLog.asset_type == asset_type)
@@ -1822,12 +1822,19 @@ class UploadEngine:
 
         rows = []
         for i in items:
+            # 从 operation_detail 中解析账期
+            bill_month = ""
+            detail = i.operation_detail or ""
+            if detail.startswith("账期"):
+                parts = detail.split(":", 1)
+                if len(parts) > 0:
+                    bill_month = parts[0].replace("账期", "")
             rows.append({
-                "batchNo": i.scope_id,
+                "billMonth": bill_month,
                 "uploadTime": str(i.operate_time) if i.operate_time else None,
                 "operator": i.operator,
                 "assetType": i.asset_type,
-                "scopeDesc": i.operation_detail,
+                "scopeDesc": detail,
                 "successCount": 0,
                 "failCount": 0,
                 "uploadStatus": i.result,
